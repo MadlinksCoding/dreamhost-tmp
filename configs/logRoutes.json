@@ -1,0 +1,21 @@
+{
+  "root": "logs",
+  "criticalRoot": "logs/critical",
+  "TESTS": {
+    "category": "tests",
+    "description": "Test logs for encryption and logging functionality",
+    "retention": "7d",
+    "encryption": {
+      "algorithm": "aes-256-gcm"
+    },
+    "logs": [
+      {
+        "flag": "TESTS",
+        "path": "tests/{action}/{testId}/{eventDate:DD-MM-YYYY}.log",
+        "PciCompliance": false,
+        "critical": false,
+        "description": "Test log with encryption via route config"
+      }
+    ]
+  }
+}

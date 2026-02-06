@@ -1,0 +1,30 @@
+services:
+  scylla:
+    image: scylladb/scylla:latest
+    container_name: scylla
+    command:
+      - --smp=1
+      - --memory=250M
+      - --alternator-port=8000
+      - --alternator-write-isolation=always
+      - --alternator-address=0.0.0.0
+      - --rf-rack-valid-keyspaces=true
+    ports:
+      - "19042:9042" # CQL port
+      - "19203:9180" # Prometheus metrics (9180 is reserved by Windows)
+      - "8000:8000" # Alternator (DynamoDB API)
+    volumes:
+      - scylla_data:/var/lib/scylla
+  redis:
+    image: redis:7
+    container_name: redis_server
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+
+volumes:
+  scylla_data:
+  redis_data:

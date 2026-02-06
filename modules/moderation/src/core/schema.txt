@@ -1,0 +1,94 @@
+# Moderation Table Design (One-Table Model with GSIs)
+
+## Base Table: `moderation`
+
+| Field | Description | Example |
+|:---|:---|:---|
+| **pk** | Partition key (user-scoped) | `moderation#<userId>` |
+| **sk** | Sort key (time-ordered) | `media#<submittedAt>` |
+| **moderationId** | Unique identifier | `uuid` |
+| **userId** | User ID | `user_123` |
+| **contentId** | Content ID | `post_123` |
+| **type** | Content type | `image`, `video`, `text`, `link`, `report` |
+| **status** | Moderation status | `pending`, `approved`, `unapproved` |
+| **priority** | Moderation priority | `high`, `normal` |
+| **submittedAt** | Submission timestamp (epoch ms) | `1730000000000` |
+| **actionedAt** | Completion timestamp (epoch ms) | `1730010000000` |
+
+---
+
+## Core Design Goals
+- Single source of truth  
+- Indexed lookups for status, user, and date  
+- No manual index management  
+- Covers all query needs (a–h)
+
+---
+
+## Global Secondary Indexes (GSIs)
+
+### 1️⃣ GSI_StatusDate
+**Use:** By status & date (pending/approved/unapproved)  
+**PK:** `status`  
+**SK:** `submittedAt`  
+**Projection:** INCLUDE (moderationId, userId, priority, submittedAt, type)
+
+---
+
+### 2️⃣ GSI_UserStatusDate
+**Use:** By user + status  
+**PK:** `userId`  
+**SK:** `status#submittedAt`  
+**Projection:** INCLUDE (moderationId, priority, type, submittedAt)
+
+---
+
+### 3️⃣ GSI_AllByDate
+**Use:** All moderations by date (any user/status)  
+**PK:** `dayKey` (YYYYMMDD)  
+**SK:** `submittedAt`  
+**Projection:** INCLUDE (moderationId, userId, status, priority, type)
+
+---
+
+## Optional GSIs
+
+### 4️⃣ GSI_Priority
+**Use:** Filter by priority  
+**PK:** `priority`  
+**SK:** `submittedAt`
+
+---
+
+### 5️⃣ GSI_TypeDate
+**Use:** Filter by type (includes “report”)  
+**PK:** `type`  
+**SK:** `submittedAt`
+
+---
+
+### 6️⃣ GSI_ByModerationId
+**Use:** Direct lookup by moderationId  
+**PK:** `moderationId`  
+**SK:** `userId`
+
+---
+
+## Summary
+
+| GSI | PK | SK | Purpose |
+|------|----|----|----------|
+| GSI_StatusDate | status | submittedAt | By status/date |
+| GSI_UserStatusDate | userId | status#submittedAt | By user/status |
+| GSI_AllByDate | dayKey | submittedAt | All by date |
+| GSI_Priority | priority | submittedAt | By priority |
+| GSI_TypeDate | type | submittedAt | By type |
+| GSI_ByModerationId | moderationId | userId | Direct lookup |
+
+---
+
+## Implementation Notes
+- Use numeric `submittedAt` for range queries  
+- Pad `status#submittedAt` for correct sort  
+- Use INCLUDE projection for performance  
+- Shard `dayKey` if write-heavy

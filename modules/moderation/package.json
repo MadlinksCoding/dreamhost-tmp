@@ -1,0 +1,47 @@
+{
+    "name": "moderations",
+    "version": "1.0.0",
+    "main": "test/index.js",
+    "type": "commonjs",
+    "scripts": {
+        "seed": "node ./scripts/seed.js",
+        "clean": "node ./scripts/clean.js",
+        "test": "jest",
+        "test:watch": "jest --watch",
+        "test:manual": "node ./scripts/manual.js",
+        "start": "node server.js",
+        "dev": "nodemon server.js"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "description": "Requirement Status",
+    "dependencies": {
+        "@babel/core": "^7.23.0",
+        "@babel/preset-env": "^7.23.0",
+        "babel-jest": "^29.7.0",
+        "jest": "^29.7.0",
+        "@aws-sdk/client-s3": "^3.864.0",
+        "cors": "^2.8.5",
+        "dotenv": "^17.2.1",
+        "express": "^4.22.1",
+        "joi": "^18.0.2",
+        "lru-cache": "^11.2.4",
+        "luxon": "^3.7.1",
+        "morgan": "^1.10.1",
+        "nodemon": "^3.1.11",
+        "opossum": "^8.1.1",
+        "p-limit": "^5.0.0",
+        "pg": "^8.16.3",
+        "redis": "^5.8.1",
+        "util": "^0.12.5",
+        "zlib": "^1.0.5"
+    },
+    "devDependencies": {
+        "@jest/globals": "^29.7.0",
+        "jest": "^29.7.0"
+    },
+    "directories": {
+        "test": "test"
+    }
+}

@@ -1,0 +1,610 @@
+MediaHandler is a single “traffic controller” for your media items (audio, video, image, gallery, file). it receives structured inputs, checks they’re safe and complete, updates the database in a careful/atomic way, logs who did what, and (optionally) tells search to reindex. think: “one consistent gatekeeper to create, edit, schedule, publish, tag, and manage ownership, visibility, and collections.”
+
+THE BIG IDEA: STRICT AT THE EDGES, SIMPLE IN THE MIDDLE
+
+When data comes in, the first thing every method does is a sanitize & validate pass. that means:
+
+    - Only allowed fields are accepted (anything unexpected is rejected),
+    - Each field is checked for the right shape (string vs number vs boolean vs URL, etc.),
+    - A few fields get normalized (tags lowercased/deduped; co-performers deduped),
+    - For a handful of “main events” (add, update, schedule, publish), the specific fields that must be present are enforced.
+
+Once data passes that front door, the internals are intentionally straightforward: most methods do one thing (e.g., replace tags, set a poster URL, attach the main file) and they all play by the same house rules: optimistic versioning (to avoid overwriting someone else’s change), audit logging (who/what/when/before/after), and consistent logging (start/end messages, plus key branches).
+
+THE FOUR “GLOBAL” ACTIONS (HANDLERS)
+
+You’ll see four “do-everything” entry points that you’ll typically call from your API routes:
+
+handleAddMediaItem
+- creates a new media row as a draft.
+
+- if the incoming payload also includes extras (like tags, co-performers, primary file info, poster, blur controls, ownership), it will immediately call the smaller “setter” methods to apply those too.
+
+- result: you can add a row in one call, and still stay safe/atomic.
+
+handleUpdateMediaItem
+- edits an existing media row.
+
+- it doesn’t care which fields you changed; it looks at the payload and calls the right focused setters under the hood (asset, poster, metadata, tags, co-performers, blur flags, ownership, soft/hard delete).
+
+- you provide the expectedVersion to avoid stomping over someone else’s changes.
+
+handleScheduleMediaItem
+schedules a media item for the future. before it flips the switch to scheduled, it checks that all the per-type requirements are satisfied (e.g., audio must have a title, https file URL, and a positive duration; video also needs a poster and “not pending conversion”). then it also requires the publish date to be in the future. only if all of that is true do we save the scheduled state.
+
+handlePublishMediaItem
+publishes right now (or uses an existing publish date on the row). just like scheduling, it runs the per-type checklist (title present, URLs are https, durations make sense, etc.). if the row passes these checks, we set published and stamp the date. this guarantees that “published” content is always ready for public consumption.
+
+these four are “strict”: they enforce the “you cannot proceed unless X and Y exist” rules. all the other smaller methods are less strict (they still validate types and allowed fields, but they don’t say “this field is required”).
+
+how the database wrapper is wired (real vs mock)
+
+you’ve got a Postgres wrapper that can work in two modes:
+
+real mode (the default): it uses a standard PG connection pool and runs real SQL.
+
+mock mode: you turn it on with { mock:true }. in mock mode you pre-register which SQL calls should return which rows. that means you can unit-test MediaHandler without a database. the MediaHandler doesn’t change—same calls, same flow—but your tests stay fast and deterministic.
+
+this matters because the class is always written the same way: it calls db.withTransaction(...) for multi-step writes, uses db.getRow and db.getAll to read, and db.query to write. so you get one codepath for prod and tests, and you control which you want by how you construct the DB.
+
+how safety is enforced (the “first line” and the “checklist”)
+
+every method that accepts input starts with the same call: sanitize & validate. think of it as a bouncer at the door.
+
+allowlist of fields: if you pass a field the class doesn’t recognize, it refuses the request. this prevents accidental typos or letting unexpected data “slip through.”
+
+type checks: strings are strings (optionally nonempty, optionally capped in length), numbers are integers with min/max when relevant, booleans are booleans, URLs must be https, dates must parse, enums must be one of the allowed values.
+
+normalization: tags are lowercased, trimmed, deduped, and capped in count; co-performer ids are trimmed, deduped, capped.
+
+on top of that, the four global handlers have a small “required fields list”:
+
+add: owner_user_id and media_type.
+
+update: media_id and expectedVersion.
+
+schedule: media_id, expectedVersion, publish_date.
+
+publish: media_id and expectedVersion.
+
+finally, schedule/publish run a per-type checklist (the “event map”). example: for video publish, you need title, asset_url (https), duration_seconds > 0, poster_url (https), and pending_conversion must be false (so you don’t publish something that’s still converting). for audio, it’s similar but no poster needed. for image, you basically need a title + https asset URL. for scheduling, you need the same as publish plus publish_date must be in the future.
+
+optimistic concurrency (why we ask for “expectedVersion”)
+
+when you update, schedule, or publish, you provide what version you think the row is on. if the row in the database is on a different version, the class throws a ConflictError. this prevents overwriting changes that happened between your read and your write (e.g., two editors working at once). if you catch that error, you reload and decide how to merge or retry. it’s a simple, robust pattern that plays well at scale.
+
+everything is audited
+
+every write is wrapped in a small audit entry: who acted (actor user id), what they did (ADD, UPDATE, TAGS_REPLACE, PUBLISH, SCHEDULE, etc.), when it happened, before and after snapshots (in JSON). this gives you a forensic trail: you can answer “who changed this field?” and “what did it used to be?” months later. the audit is part of the same transaction as the write, so you’ll never get a write without a matching trail.
+
+logging you can actually use
+
+the class logs start and end of every method with meaningful identifiers (media id, actor id) and logs which branches were taken inside the big handlers (e.g., “during add we also set tags and co-performers”). in practice, this is what you tail when you need to debug a user-reported issue: you’ll see the exact sequence of actions, in order, with the IDs you care about.
+
+how the smaller methods fit in (setters, getters, and lists)
+
+outside of the four big handlers, there’s a large set of small, predictable methods. here are the highlights in non-technical terms:
+
+addRow
+create one new media row (each upload is its own row). starts as draft. can include some optional fields right away (e.g., title, description, visibility), but you don’t have to.
+
+updateMetadata
+change text fields (title, description), visibility, “featured”/“coming soon” flags, gallery poster, custom meta JSON. bumps the version and writes an audit log.
+
+attachPrimaryAsset
+set or replace the main file info: the URL, extension, file name/size, duration, resolution, and whether conversion is still in progress. this is the heart of what makes a media item “real.”
+
+setPoster
+update the poster/thumbnail URL for videos or images.
+
+applyBlurControls
+toggle the placeholder/blurred overlay flags and their intensities for both main poster and trailer UI.
+
+setTags / addTag / removeTag
+either replace the entire tag set at once, or add/remove a single tag. always versioned and audited.
+
+setCoPerformers
+replace the full set of co-performer IDs for an item in one go (and yes, co-performers are also normalized and capped).
+
+setOwnership
+transfer the item to a different owner user id.
+
+setVisibility / setFeatured / setComingSoon
+flip those flags in a clean, versioned way.
+
+setCustomMeta
+write arbitrary JSON metadata; either replace it or merge into what’s there.
+
+softDelete / hardDelete
+soft delete marks the row “deleted” but keeps it in the table (status=deleted, is_deleted=true); hard delete removes the row and its children (tags, co-performers, reminders, audit entries, collection links).
+
+getById
+fetch one media row, and optionally include its tags and co-performers. simple, predictable.
+
+list… (owner, public, featured, coming soon, by tag)
+all list methods run through one central filter builder. you can scope by owner, or fetch public/published things, or just featured, or only “coming soon,” or filter by a tag. you can also add AND-filters: by media type, status, duration range, date range, or “must include these tags.” results are ordered by “most recently published (or created), then newest id” for stable, feed-friendly results. these lists are designed as the safe fallback when search isn’t available or is out of date.
+
+search
+whenever you wire in Elasticsearch, this becomes the primary. until then, it falls back to a simple “title/description contains text” for published items. it’s not meant to be fancy—it’s meant to be reliable even if ES is offline.
+
+collections (create, addToCollection, removeFromCollection, listCollection)
+lets you group items without changing the items themselves. that’s the “collections” table + a join table that says “this media id belongs to this collection, at this position.”
+
+schedulePublish / cancelSchedule / setStatusPublished / setStatusScheduled
+thin wrappers/delegates around the main schedule/publish handlers so you can trigger the same logic from different call sites without duplicating code. cancelSchedule checks that the item is actually scheduled, then rolls it back to “pending review.”
+
+each of these “smaller” calls still does the same core things: validate inputs, check version, write the change (and bump the version/timestamp), add an audit entry, and kick the search reindex stub so you have a clear place to put ES later.
+
+publishing & scheduling, in human terms
+
+publishing and scheduling are where people usually trip up, so here’s the non-technical view.
+
+a publish is you saying “this is ready now.” the class checks the row has the essentials for its type. for audio: has a title, has a secure file URL, has a duration > 0. for video: same, plus it must have a poster image and it must not still be converting. for image: title + secure URL. if the row passes, the class flips status to published and sets the publish date to now (unless one was already set).
+
+a schedule is “publish later.” it checks the exact same per-type essentials plus “the chosen time is in the future.” if that’s true, it flips status to scheduled, stores the date, and you can have a cron job pick it up later (you mentioned you already have a cron table—perfect).
+
+this design guarantees that anything that becomes visible to users has all the stuff it needs and no awkward half-converted files slip out.
+
+how your API payloads flow through (examples you gave)
+
+when you post a big payload (like those examples with steps, media_details, subscription_ppv, etc.), your API layer can map those UI-shaped fields into the narrow set of fields the class expects. in other words, you keep the UI rich and flexible, but you only pass the validated core into MediaHandler. for example:
+
+the final media_title, media_description, tags, and coperformers become title, description, tags, coperformers.
+
+the chosen asset URLs (audio/video/image) become asset_url.
+
+image/video poster becomes poster_url.
+
+pricing & product links live in media_meta or other dedicated columns you’ve set up—this class simply accepts them as JSON if you route them into media_meta.
+
+then you decide which handler or setter is appropriate:
+
+creating from scratch? call handleAddMediaItem with owner, media type, and whatever else is ready now (tags/poster/asset/etc.). if publishing immediately, follow with handlePublishMediaItem.
+
+editing an existing item? call handleUpdateMediaItem; it will detect what to run based on which fields you included. if you want to publish in that same flow, either call handlePublishMediaItem next, or call setStatusPublished which just delegates to publish.
+
+failures you can understand (and fix)
+
+because every method throws specific error types, failures map plainly to user fixes:
+
+ValidationError → the payload is wrong (missing required field for that handler, not https, invalid type, etc.). fix the input.
+
+ConflictError → version mismatch (someone else changed it; reload and try again).
+
+NotFoundError → media id doesn’t exist (or is deleted); double-check ids.
+
+StateTransitionError → you tried an invalid flip (e.g., cancel schedule when not scheduled).
+
+the logging will show the start/end and the media/user id, so you can pair the error with the exact attempt.
+
+why this approach scales well
+
+single source of truth for fields: one registry declares what every field is supposed to look like. updates to types/constraints happen in one place.
+
+strict handlers + simple setters: you get strong guarantees at the “big moments” (add/update/schedule/publish), while still having lots of small, composable building blocks that don’t second-guess you.
+
+audit everywhere: you can debug user-reported issues and answer compliance questions with evidence.
+
+mockable DB: fast, deterministic tests; same class in prod or test.
+
+search optional: you can ship without Elasticsearch or survive ES downtime; DB queries still cover listing and simple search until ES is ready.
+
+a simple mental model to keep in your head
+
+a request arrives → sanitize/validate (reject anything funky).
+
+if it’s a “big” action (add/update/schedule/publish) → check the “must haves.”
+
+open a transaction → read the current row → version check (stop if out of date).
+
+perform the write(s), bump version/timestamps, audit the change.
+
+commit, log success, and optionally nudge search to reindex.
+
+rinse and repeat for every method. that’s the entire class in a nutshell—strict front door, simple interior, strong paper trail, and clear logging.
+
+-----------------------------------------------
+
+handleAddMediaItem(payload, actorUserId)
+Creates a new media row (draft) and, based on which optional fields are present, chains into setters for tags, co-performers, asset, poster, blur controls, and ownership. It validates first, logs start/branches/end, writes an audit entry via the invoked methods, and triggers a search index upsert.
+
+handleUpdateMediaItem(payload)
+A one-shot updater that routes to the appropriate setters depending on which fields you send (ownership, asset, poster, metadata, tags, co-performers, blur). It validates & version-checks through each called method, logs every branch, audits each change, and reindexes where relevant.
+
+handleScheduleMediaItem(payload)
+Schedules a media item by enforcing the simple event list (publish rules + publish_date > now) for its media_type and updates status to scheduled. Runs in a transaction with version check, logs/audits, writes the new publish date, and reindexes.
+
+handlePublishMediaItem(payload)
+Publishes a media item by enforcing the strict per-type publish rules (e.g., video must have poster, duration > 0, not pending_conversion). Runs in a transaction with version check, sets status='published' (and publish_date if missing), logs/audits, and reindexes.
+
+addRow(payload)
+Inserts a brand-new media row as draft, one row per upload, with optional initial fields (e.g., asset_url, poster_url) and initial relations (tags, co-performers). Validates, logs, writes audit (add), and triggers a search index upsert.
+
+updateMetadata(payload)
+Partially updates title, description, visibility, featured/coming_soon flags, gallery poster/image variants, and media_meta. It validates, checks optimistic version, applies dynamic SETs, bumps version/time, logs/audits, and reindexes.
+
+attachPrimaryAsset(payload)
+Sets or replaces the main asset and its properties (file extension/name/size, duration, resolution, pending_conversion). Validates, enforces version match, updates fields, bumps version/time, logs/audits, and reindexes.
+
+setPoster(payload)
+Updates the poster_url for a media row. Validates, checks version, updates URL, bumps version/time, logs/audits, and reindexes.
+
+applyBlurControls(payload)
+Updates placeholder/blur flags and intensities (including trailer blur fields). Validates, checks version, stores flags atomically, bumps version/time, logs/audits, and reindexes.
+
+setVisibility(payload)
+Changes the visibility enum (public/private/subscribers/purchasers/unlisted). Validates/coerces the enum, uses a small internal update helper to bump version/time, logs/audits, and reindexes.
+
+setFeatured(payload)
+Toggles the featured flag on/off. Validates, performs a minimal field update with version bump, logs/audits, and reindexes.
+
+setComingSoon(payload)
+Toggles the coming_soon flag on/off. Validates, updates the boolean, bumps version/time, logs/audits, and reindexes.
+
+setTags(payload)
+Atomically replaces the entire tag set: deletes current tags and inserts the new normalized list. Validates + version checks, logs, audits the replacement, bumps version/time, and reindexes.
+
+addTag(payload)
+Adds a single normalized tag if it isn’t already set. Validates + version checks, upserts the tag row, bumps version/time, logs/audits, and reindexes.
+
+removeTag(payload)
+Removes a single normalized tag. Validates + version checks, deletes tag mapping, bumps version/time, logs/audits, and reindexes.
+
+setCoPerformers(payload)
+Atomically replaces the co-performer list (deduped, capped). Validates + version checks, clears old rows and inserts the new list, bumps version/time, logs/audits, and reindexes.
+
+setOwnership(payload)
+Transfers ownership to new_owner_user_id. Validates, minimal field update with version bump, logs/audits (ownership action), and reindexes.
+
+setCustomMeta(payload)
+Replaces or merges media_meta JSON based on the merge flag. Validates + version checks, writes JSONB, bumps version/time, logs/audits with before/after JSON, and reindexes.
+
+softDelete(payload)
+Sets is_deleted=true and status='deleted', recording deleted_at and bumping version/time. Validates + version checks, logs/audits, and removes the document from search index.
+
+hardDelete(payload)
+Physically deletes the media row and all related children (tags, co-performers, reminders, audits, collection links). Validates, executes within a transaction, logs/audits, and deletes from search index.
+
+getById(payload)
+Fetches a single media row; optionally joins tags and co-performers when requested. Validates inputs, returns the row (or 404), and logs the operation.
+
+listByOwner(payload)
+Lists media for a specific owner with optional filters and pagination (keyset-style). Validates parameters, uses a central list builder, logs counts, and returns items plus a next cursor (null as provided).
+
+listPublic(payload)
+Lists publicly visible, published media (DB fallback to search). Validates inputs, applies filters/pagination in the central builder, logs, and returns items.
+
+listFeatured(payload)
+Lists published items with featured=true. Validates inputs, uses the central builder for filters/pagination, logs, and returns items.
+
+listComingSoon(payload)
+Lists items flagged as coming_soon, regardless of publish state. Validates inputs, queries via the builder, logs, and returns items.
+
+listByTag(payload)
+Lists items that have a specific tag, with optional additional filters (duration, type, etc.). Validates inputs, uses the builder, logs, and returns items.
+
+search(payload)
+Performs search primarily through the search index (hooked), with a DB fallback using ILIKE on title/description. Validates inputs, logs the query, returns item list and null cursor.
+
+reindexSearch(payload)
+Forces a reindex of a single media document in the search backend. Validates inputs, calls the indexer hook, logs, and returns a confirmation.
+
+createCollection(payload)
+Creates a collection/playlist with title/description/visibility/poster and returns its collection_id. Validates inputs, writes the collection row, logs/audits, and returns IDs.
+
+addToCollection(payload)
+Adds a media item to a collection, optionally setting position (upsert semantics). Validates inputs, writes mapping, logs/audits, and returns the relation identifiers.
+
+removeFromCollection(payload)
+Removes a media item from a collection. Validates inputs, deletes mapping, logs/audits, and returns a removal confirmation.
+
+listCollection(payload)
+Lists items within a collection ordered by position (desc) then media_id. Validates inputs, reads joined rows, paginates, logs, and returns items.
+
+schedulePublish(payload)
+A thin delegator that validates and forwards to handleScheduleMediaItem. Keeps a single path for schedule rules and audit behavior; logs the delegation.
+
+cancelSchedule(payload)
+If an item is scheduled, reverts it to pending_review with version bump. Validates + version checks, enforces prior state, logs/audits, reindexes, and returns new status.
+
+setStatusPublished(payload)
+Delegates to handlePublishMediaItem so the same strict per-type publish rules are enforced. Validates and logs the delegation without duplicating publish logic.
+
+setStatusScheduled(payload)
+Delegates to handleScheduleMediaItem, ensuring the same schedule validation runs. Validates and logs the delegation for consistent behavior.
+
+sanitizeValidateFirst(payload, methodKeyOrNull)
+The first line in every public entry: enforces handler-level required fields (for the 4 handlers only), and strictly type-checks every provided key against the single FIELD_SPEC. Unknown fields or rule mismatches throw; also normalizes arrays (tags/co-performers) up front.
+
+_coerceByRule(field, value, rule)
+Implements strict, centralized type and constraint enforcement (string/nonempty/max, https URL, int ranges, bool, enums, JSON deep-clone, datetime). Any mismatch causes a ValidationError; it’s the backbone of consistent validation everywhere.
+
+enforceEventList(eventKey, row)
+Validates publish/schedule readiness using your simple, readable rule atoms (presence, equality, >0, =false, :https, and >now) with per-type lists. Dispatchers map generic events (publishMediaItem/scheduleMediaItem) to the type-specific requirements.
+
+normalizeTags(tags)
+Trims, lowercases, de-dupes, and caps tags by count and length. Ensures all tag write paths work with a safe, normalized set before persistence.
+
+normalizeCoPerformers(ids)
+Trims, de-dupes, caps size, and enforces ID length limits for co-performers. Produces a stable, validated array for write operations.
+
+expectVersion(row, expectedVersion)
+Optimistic concurrency guard that throws on mismatch or invalid expectedVersion. Called in all mutating paths that require version safety.
+
+writeAudit(client, { mediaId, actorUserId, action, beforeJson, afterJson })
+Persists an immutable audit record with timestamps, actor, action, and before/after JSONB. Every state change calls this inside the same transaction for perfect lineage.
+
+_simpleFieldUpdate({ media_id, expectedVersion, fields, actorUserId, action })
+Internal helper for small, targeted updates that still need version bump, audit logging, and reindexing. Reduces duplication and guarantees consistent logging/OC/rules.
+
+_listWithFilters(params)
+Central list builder that composes SQL WHERE clauses for the supported scopes and filters, orders by publish/entry date then id, and applies a keyset-style limit. Used by all list-style endpoints for consistent, predictable pagination and performance.
+
+=============================
+
+Database checker:
+OK — here are the DB checklists for EVERY method except the 4 global handlers
+(excluded: handleAddMediaItem, handleUpdateMediaItem, handleScheduleMediaItem, handlePublishMediaItem).
+
+Format = exactly what to verify in DB after the call.
+
+------------------------------------------------------------------------------
+cancelSchedule
+• media: row(media_id) exists AND is_deleted=false
+• media.status = 'pending_review'
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media.updated_by_user_id = actorUserId (or preserved prior if null passed)
+• media.publish_date: unchanged (still whatever it was)
+• media_audit: one row with action='schedule', after_json.status='pending_review'
+• search index: refreshed (doc exists)
+
+------------------------------------------------------------------------------
+setStatusPublished  (delegates publish rules; still check DB)
+• media.status = 'published'
+• media.publish_date IS NOT NULL (if was NULL, now ≈ NOW())
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='publish', after_json.status='published'
+• search index: refreshed (doc exists)
+
+------------------------------------------------------------------------------
+setStatusScheduled  (delegates schedule rules; still check DB)
+• media.status = 'scheduled'
+• media.publish_date > NOW()
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='schedule', after_json.status='scheduled'
+• search index: refreshed (doc exists)
+
+------------------------------------------------------------------------------
+addRow  (KEEP? You said “add is global”; if you mean exclude, skip this. If we keep it, verify:)
+• media: new row with status='draft', version=1, is_deleted=false
+• media.entry_date ≈ NOW(), media.last_updated ≈ NOW()
+• media.owner_user_id, media.media_type set
+• optional: asset/poster/meta fields set as provided
+• media_tags/media_coperformers: rows exist as provided
+• media_audit: action='add', after_json.created=true
+• search index: doc exists
+
+------------------------------------------------------------------------------
+updateMetadata
+• media: targeted fields changed (title/description/visibility/featured/coming_soon/image_variants_json/gallery_poster_url/media_meta)
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media.updated_by_user_id = actorUserId (or preserved prior if null passed)
+• media_audit: action='update', after_json.version matches
+• search index: refreshed
+
+------------------------------------------------------------------------------
+attachPrimaryAsset
+• media.asset_url updated (https)
+• media.file_extension/file_name/file_size_bytes/duration_seconds/video_width/video_height as provided
+• media.pending_conversion true/false as provided
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='attach_primary_asset'
+• search index: refreshed
+
+------------------------------------------------------------------------------
+setPoster
+• media.poster_url updated (https)
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='set_poster'
+• search index: refreshed
+
+------------------------------------------------------------------------------
+applyBlurControls
+• media.placeholder_lock / blurred_lock / blurred_value_px updated per inputs
+• media.trailer_blurred_lock / trailer_blurred_value_px updated per inputs
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='apply_blur_controls'
+• search index: refreshed
+
+------------------------------------------------------------------------------
+setVisibility
+• media.visibility updated (enum)
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='set_visibility'
+• search index: refreshed
+
+------------------------------------------------------------------------------
+setFeatured
+• media.featured = true/false
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='set_featured'
+• search index: refreshed
+
+------------------------------------------------------------------------------
+setComingSoon
+• media.coming_soon = true/false
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='set_coming_soon'
+• search index: refreshed
+
+------------------------------------------------------------------------------
+setTags
+• media_tags: all old rows for media_id removed
+• media_tags: new rows inserted, tags normalized (lowercase, ≤ max length), no dupes
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='set_tags' (TAGS_REPLACE), after_json.tags is the final set
+• search index: refreshed
+
+------------------------------------------------------------------------------
+addTag
+• media_tags: row(media_id, tag) exists (ON CONFLICT DO NOTHING)
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='add_tag', after_json.tag = tag
+• search index: refreshed
+
+------------------------------------------------------------------------------
+removeTag
+• media_tags: row(media_id, tag) removed
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='remove_tag', after_json.removed = tag
+• search index: refreshed
+
+------------------------------------------------------------------------------
+setCoPerformers
+• media_coperformers: all old rows for media_id removed
+• media_coperformers: new rows inserted (deduped, ≤ max)
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='set_coperformers', after_json.coperformers is the final array
+• search index: refreshed
+
+------------------------------------------------------------------------------
+setOwnership
+• media.owner_user_id = new_owner_user_id
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='set_ownership', before/after owner ids present
+• search index: refreshed
+
+------------------------------------------------------------------------------
+setCustomMeta
+• media.media_meta updated (merged if merge=true, else replaced)
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='update', before/after JSON present
+• search index: refreshed
+
+------------------------------------------------------------------------------
+softDelete
+• media.is_deleted = true
+• media.status = 'deleted'
+• media.deleted_at ≈ NOW()
+• media.version = previous_version + 1
+• media.last_updated ≈ NOW()
+• media_audit: action='soft_delete'
+• search index: doc removed
+
+------------------------------------------------------------------------------
+hardDelete
+• media_tags/media_coperformers/media_reminders/media_audit/collection_media: all rows for media_id removed
+• media: row removed
+• media_audit: (final write already removed; rely on external logs)
+• search index: doc removed
+
+------------------------------------------------------------------------------
+getById
+• media: row exists AND is_deleted=false
+• (optional) media_tags: tag list matches request when includeTags=true
+• (optional) media_coperformers: performer list matches when includeCoPerformers=true
+
+------------------------------------------------------------------------------
+listByOwner
+• SELECT from media WHERE owner_user_id = given AND is_deleted=false
+• ORDER BY COALESCE(publish_date, entry_date) DESC, media_id DESC
+• LIMIT applied; results count ≤ requested limit
+
+------------------------------------------------------------------------------
+listPublic
+• SELECT from media WHERE status='published' AND is_deleted=false
+• visibility IN ('public','unlisted','subscribers','purchasers')
+• ORDER/PAGINATION as above
+
+------------------------------------------------------------------------------
+listFeatured
+• SELECT from media WHERE status='published' AND featured=true AND is_deleted=false
+• ORDER/PAGINATION as above
+
+------------------------------------------------------------------------------
+listComingSoon
+• SELECT from media WHERE coming_soon=true AND is_deleted=false
+• ORDER/PAGINATION as above
+
+------------------------------------------------------------------------------
+listByTag
+• SELECT from media WHERE is_deleted=false AND EXISTS(SELECT 1 FROM media_tags WHERE media_id=m.media_id AND tag=$tag)
+• ORDER/PAGINATION as above
+
+------------------------------------------------------------------------------
+search  (DB fallback path)
+• SELECT from media WHERE is_deleted=false AND status='published' AND (title ILIKE %q% OR description ILIKE %q%)
+• ORDER BY COALESCE(publish_date, entry_date) DESC, media_id DESC
+• LIMIT 101 (DB fallback) — confirm ≤101 returned
+
+------------------------------------------------------------------------------
+reindexSearch
+• (no DB changes) — confirm search index received an upsert for media_id
+
+------------------------------------------------------------------------------
+createCollection
+• collections: new row(collection_id, owner_user_id, title, description, visibility, poster_url, created_at≈NOW())
+• media_audit: action='collection_create', after_json.collection_id present
+
+------------------------------------------------------------------------------
+addToCollection
+• collection_media: upsert(collection_id, media_id) with position (nullable)
+• media_audit: action='collection_add', after_json.collection_id matches
+
+------------------------------------------------------------------------------
+removeFromCollection
+• collection_media: row(collection_id, media_id) removed
+• media_audit: action='collection_remove', after_json.collection_id matches
+
+------------------------------------------------------------------------------
+listCollection
+• JOIN collection_media → media on media_id
+• WHERE collection_id = given AND media.is_deleted=false
+• ORDER BY COALESCE(position,0) DESC, media.media_id DESC
+• LIMIT applied; results ≤ limit
+
+------------------------------------------------------------------------------
+sanitizeValidateFirst  (no DB write)
+• N/A DB — verify: unknown fields rejected; required for handlers enforced; arrays normalized
+
+------------------------------------------------------------------------------
+_coerceByRule  (no DB write)
+• N/A DB — verify: rule violations throw; https URL enforced; int bounds applied
+
+------------------------------------------------------------------------------
+enforceEventList  (no DB write)
+• N/A DB — verify: event atoms satisfied (presence, :https, >0, =false, =value, >now)
+
+------------------------------------------------------------------------------
+normalizeTags / normalizeCoPerformers  (no DB write)
+• N/A DB — verify: output arrays are trimmed, deduped, capped, and length-limited
+
+------------------------------------------------------------------------------
+expectVersion  (no DB write)
+• N/A DB — verify: (row.version == expectedVersion) else ConflictError
+
+------------------------------------------------------------------------------
+writeAudit
+• media_audit: one row inserted with occurred_at≈NOW(), action, actor_user_id, before_json, after_json
+• JSONB stored as valid JSON
+
+------------------------------------------------------------------------------
+_listWithFilters
+• SELECT against media with composed WHERE
+• ORDER BY COALESCE(publish_date, entry_date) DESC, media_id DESC

@@ -1,0 +1,76 @@
+{
+  "scylla": {
+    "tables": {
+      "Users": {
+        "TableName": "Users",
+        "since": 2.0,
+        "PK": "pk",
+        "SK": "sk",
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeTypes": { "pk": "S", "sk": "S", "email": "S" }
+      }
+    }
+  },
+  "postgres": {
+    "tables": {
+      "users": {
+        "since": 2.0,
+        "columns": {
+          "id":         { "type": "uuid", "primary": true, "notNull": true, "default": "gen_random_uuid()", "mysql": { "type": "char(36)" } },
+          "email":      { "type": "varchar(320)", "notNull": true, "since": 2.0 },
+          "display":    { "type": "varchar(200)", "since": 2.0 },
+          "middle_name":{ "type": "varchar(100)", "since": 2.0 },
+          "created_at": { "type": "timestamptz", "default": "NOW()", "since": 2.0 }
+        },
+        "indexes": [
+          { "name": "users_email_unq", "unique": true, "columns": ["email"], "since": 2.0 }
+        ]
+      },
+      "events": {
+        "since": 2.0,
+        "columns": {
+          "id":          { "type": "bigserial", "primary": true, "postgres": { "type": "bigserial" }, "since": 2.0 },
+          "creator_id":  { "type": "uuid", "notNull": true, "since": 2.0 },
+          "title":       { "type": "varchar(255)", "notNull": true, "since": 2.0 },
+          "starts_at":   { "type": "timestamptz", "notNull": true, "since": 2.0 },
+          "ends_at":     { "type": "timestamptz", "notNull": true, "since": 2.0 }
+        },
+        "indexes": [
+          { "name": "events_creator_idx", "columns": ["creator_id", "starts_at"], "since": 2.0 }
+        ]
+      }
+    }
+  },
+  "mysql": {
+    "tables": {
+      "users": {
+        "since": 2.0,
+        "columns": {
+          "id":         { "type": "uuid", "primary": true, "notNull": true, "mysql": { "type": "char(36)" } },
+          "email":      { "type": "varchar(320)", "notNull": true, "since": 2.0 },
+          "display":    { "type": "varchar(200)", "since": 2.0 },
+          "middle_name":{ "type": "varchar(100)", "since": 2.0 },
+          "created_at": { "type": "datetime", "default": "NOW()", "since": 2.0 }
+        },
+        "indexes": [
+          { "name": "users_email_unq", "unique": true, "columns": ["email"], "since": 2.0 }
+        ],
+        "mysql": { "engine": "InnoDB", "charset": "utf8mb4" }
+      },
+      "events": {
+        "since": 2.0,
+        "columns": {
+          "id":          { "type": "bigint", "autoIncrement": true, "primary": true, "since": 2.0 },
+          "creator_id":  { "type": "char(36)", "notNull": true, "since": 2.0 },
+          "title":       { "type": "varchar(255)", "notNull": true, "since": 2.0 },
+          "starts_at":   { "type": "datetime", "notNull": true, "since": 2.0 },
+          "ends_at":     { "type": "datetime", "notNull": true, "since": 2.0 }
+        },
+        "indexes": [
+          { "name": "events_creator_idx", "columns": ["creator_id", "starts_at"], "since": 2.0 }
+        ],
+        "mysql": { "engine": "InnoDB", "charset": "utf8mb4" }
+      }
+    }
+  }
+}

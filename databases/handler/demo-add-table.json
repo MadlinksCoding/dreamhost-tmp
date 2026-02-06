@@ -1,0 +1,96 @@
+{
+  "postgres": {
+    "tables": {
+      "users": {
+        "since": 2.0,
+        "columns": {
+          "id": { "type": "uuid", "primary": true, "notNull": true, "default": "gen_random_uuid()" },
+          "email": { "type": "varchar(320)", "notNull": true }
+        }
+      },
+      "orders": {
+        "since": 2.1,
+        "columns": {
+          "order_id": { "type": "uuid", "primary": true, "notNull": true, "default": "gen_random_uuid()" },
+          "user_id": { "type": "uuid", "notNull": true },
+          "amount": { "type": "decimal(10,2)", "notNull": true },
+          "status": { "type": "varchar(50)", "notNull": true, "default": "'pending'" },
+          "created_at": { "type": "timestamptz", "default": "NOW()" }
+        },
+        "indexes": [
+          { "name": "orders_user_id_idx", "columns": ["user_id"], "since": 2.1 },
+          { "name": "orders_status_idx", "columns": ["status"], "since": 2.1 }
+        ]
+      }
+    }
+  },
+  "mysql": {
+    "tables": {
+      "users": {
+        "since": 2.0,
+        "columns": {
+          "id": { "type": "char(36)", "primary": true, "notNull": true },
+          "email": { "type": "varchar(320)", "notNull": true }
+        }
+      },
+      "orders": {
+        "since": 2.1,
+        "columns": {
+          "order_id": { "type": "char(36)", "primary": true, "notNull": true },
+          "user_id": { "type": "char(36)", "notNull": true },
+          "amount": { "type": "decimal(10,2)", "notNull": true },
+          "status": { "type": "varchar(50)", "notNull": true, "default": "'pending'" },
+          "created_at": { "type": "datetime", "default": "CURRENT_TIMESTAMP" }
+        },
+        "indexes": [
+          { "name": "orders_user_id_idx", "columns": ["user_id"], "since": 2.1 },
+          { "name": "orders_status_idx", "columns": ["status"], "since": 2.1 }
+        ]
+      }
+    }
+  },
+  "scylla": {
+    "tables": {
+      "Users": {
+        "TableName": "Users",
+        "since": 2.0,
+        "PK": "id",
+        "BillingMode": "PAY_PER_REQUEST",
+        "Attributes": {
+          "id": { "AttributeType": "S" },
+          "email": { "AttributeType": "S" }
+        }
+      },
+      "Orders": {
+        "TableName": "Orders",
+        "since": 2.1,
+        "PK": "order_id",
+        "BillingMode": "PAY_PER_REQUEST",
+        "Attributes": {
+          "order_id": { "AttributeType": "S" },
+          "user_id": { "AttributeType": "S" },
+          "amount": { "AttributeType": "N" },
+          "status": { "AttributeType": "S" },
+          "created_at": { "AttributeType": "S" }
+        },
+        "GlobalSecondaryIndexes": [
+          {
+            "IndexName": "user_id_idx",
+            "KeySchema": [
+              { "AttributeName": "user_id", "KeyType": "HASH" }
+            ],
+            "Projection": { "ProjectionType": "ALL" }
+          }
+        ]
+      }
+    }
+  }
+}
+
+
+
+
+
+
+
+

@@ -1,0 +1,474 @@
+{
+	"info": {
+		"_postman_id": "moderation-api-collection",
+		"name": "Moderation API",
+		"description": "Complete API collection for Moderation system - All endpoints for testing moderation workflows",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Health Check",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/health",
+					"host": ["{{base_url}}"],
+					"path": ["health"]
+				}
+			}
+		},
+		{
+			"name": "Create Moderation Entry",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"userId\": \"user_123\",\n  \"contentId\": \"content_456\",\n  \"type\": \"image\",\n  \"priority\": \"normal\",\n  \"contentType\": \"post\",\n  \"mediaType\": \"jpg\",\n  \"isSystemGenerated\": false,\n  \"isPreApproved\": false\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/moderation",
+					"host": ["{{base_url}}"],
+					"path": ["moderation"]
+				}
+			}
+		},
+		{
+			"name": "Get Moderation by ID",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/moderation/:moderationId?userId=user_123",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", ":moderationId"],
+					"query": [
+						{
+							"key": "userId",
+							"value": "user_123",
+							"description": "Optional: Filter by user ID"
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "Get Items by Status",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/moderation/status/pending?limit=20&start=1730000000000&end=1730086400000&asc=false",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", "status", "pending"],
+					"query": [
+						{
+							"key": "limit",
+							"value": "20",
+							"description": "Number of items per page"
+						},
+						{
+							"key": "start",
+							"value": "1730000000000",
+							"description": "Start timestamp (milliseconds)"
+						},
+						{
+							"key": "end",
+							"value": "1730086400000",
+							"description": "End timestamp (milliseconds)"
+						},
+						{
+							"key": "asc",
+							"value": "false",
+							"description": "Sort ascending (true) or descending (false)"
+						},
+						{
+							"key": "nextToken",
+							"value": "",
+							"description": "Pagination token from previous response",
+							"disabled": true
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "Get Items by Status - Approved",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/moderation/status/approved?limit=20",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", "status", "approved"],
+					"query": [
+						{
+							"key": "limit",
+							"value": "20"
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "Get Items by Status - Rejected",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/moderation/status/rejected?limit=20",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", "status", "rejected"],
+					"query": [
+						{
+							"key": "limit",
+							"value": "20"
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "Get Items by Type",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/moderation/type/image?limit=20&start=1730000000000&end=1730086400000",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", "type", "image"],
+					"query": [
+						{
+							"key": "limit",
+							"value": "20"
+						},
+						{
+							"key": "start",
+							"value": "1730000000000"
+						},
+						{
+							"key": "end",
+							"value": "1730086400000"
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "Get Items by Type - Video",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/moderation/type/video?limit=20",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", "type", "video"],
+					"query": [
+						{
+							"key": "limit",
+							"value": "20"
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "Get Items by Type - Text",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/moderation/type/text?limit=20",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", "type", "text"],
+					"query": [
+						{
+							"key": "limit",
+							"value": "20"
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "Get Items by Priority",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/moderation/priority/high?limit=20",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", "priority", "high"],
+					"query": [
+						{
+							"key": "limit",
+							"value": "20"
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "Get User Items by Status",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/moderation/user/user_123/status/pending?limit=20&start=1730000000000&end=1730086400000",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", "user", "user_123", "status", "pending"],
+					"query": [
+						{
+							"key": "limit",
+							"value": "20"
+						},
+						{
+							"key": "start",
+							"value": "1730000000000"
+						},
+						{
+							"key": "end",
+							"value": "1730086400000"
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "Get Items by Date",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/moderation/date/20241201?limit=20",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", "date", "20241201"],
+					"query": [
+						{
+							"key": "limit",
+							"value": "20"
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "Approve Moderation",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"userId\": \"user_123\",\n  \"action\": \"approve\",\n  \"reason\": \"Content meets all guidelines\",\n  \"moderatedBy\": \"Allen\",\n  \"moderationType\": \"standard\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/moderation/:moderationId/action",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", ":moderationId", "action"]
+				}
+			}
+		},
+		{
+			"name": "Decline Moderation",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"userId\": \"user_123\",\n  \"action\": \"reject\",\n  \"reason\": \"Content violates community guidelines\",\n  \"moderatedBy\": \"Linden\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/moderation/:moderationId/action",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", ":moderationId", "action"]
+				}
+			}
+		},
+		{
+			"name": "Escalate Moderation",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"userId\": \"user_123\",\n  \"escalatedBy\": \"Allen\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/moderation/:moderationId/escalate",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", ":moderationId", "escalate"]
+				}
+			}
+		},
+		{
+			"name": "Add Note to Moderation",
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"userId\": \"user_123\",\n  \"note\": \"Needs additional review for copyright concerns\",\n  \"addedBy\": \"Linden\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/moderation/:moderationId/note",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", ":moderationId", "note"]
+				}
+			}
+		},
+		{
+			"name": "Filter: Status + Date Range",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/moderation/status/pending?start=1730000000000&end=1730086400000&limit=50",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", "status", "pending"],
+					"query": [
+						{
+							"key": "start",
+							"value": "1730000000000",
+							"description": "Start timestamp (7 days ago)"
+						},
+						{
+							"key": "end",
+							"value": "1730086400000",
+							"description": "End timestamp (now)"
+						},
+						{
+							"key": "limit",
+							"value": "50"
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "Filter: Status + Date Range + UID",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/moderation/user/user_123/status/pending?start=1730000000000&end=1730086400000&limit=50",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", "user", "user_123", "status", "pending"],
+					"query": [
+						{
+							"key": "start",
+							"value": "1730000000000"
+						},
+						{
+							"key": "end",
+							"value": "1730086400000"
+						},
+						{
+							"key": "limit",
+							"value": "50"
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "Filter: Date Range + UID",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/moderation/user/user_123/status/pending?start=1730000000000&end=1730086400000&limit=50",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", "user", "user_123", "status", "pending"],
+					"query": [
+						{
+							"key": "start",
+							"value": "1730000000000",
+							"description": "Query all statuses by calling multiple endpoints"
+						},
+						{
+							"key": "end",
+							"value": "1730086400000"
+						},
+						{
+							"key": "limit",
+							"value": "50"
+						}
+					]
+				},
+				"description": "Note: To get ALL statuses for a user, call this endpoint multiple times with different status values (pending, approved, rejected, escalated)"
+			}
+		},
+		{
+			"name": "Filter: Status + Date Range + Type",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "{{base_url}}/moderation/type/image?start=1730000000000&end=1730086400000&limit=50",
+					"host": ["{{base_url}}"],
+					"path": ["moderation", "type", "image"],
+					"query": [
+						{
+							"key": "start",
+							"value": "1730000000000",
+							"description": "Filter by type, then filter results by status in frontend"
+						},
+						{
+							"key": "end",
+							"value": "1730086400000"
+						},
+						{
+							"key": "limit",
+							"value": "50"
+						}
+					]
+				},
+				"description": "Note: For status + type filtering, get items by type first, then filter by status in frontend, OR use the status endpoint and filter by type in frontend"
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:3000",
+			"type": "string"
+		},
+		{
+			"key": "moderationId",
+			"value": "",
+			"type": "string",
+			"description": "Set this after creating a moderation entry"
+		}
+	]
+}
+
+
+
+
+

@@ -1,0 +1,104 @@
+{
+  "manual_actions": {
+    "PK": "user_id",
+    "SK": "sk_ts",
+    "Fields": [
+      { "name": "id", "type": "S" },
+      {
+        "name": "user_id",
+        "type": "S"
+      },
+      {
+        "name": "sk_ts",
+        "type": "S"
+      },
+      { "name": "created_at", "type": "N" },
+      { "name": "updated_at", "type": "N" },
+      { "name": "deleted_at", "type": "N" }
+    ]
+  },
+  "system_blocks": {
+    "PK": "identifier",
+    "SK": "sk_type",
+    "Fields": [
+      { "name": "id", "type": "S" },
+      { "name": "identifier", "type": "S" },
+      { "name": "sk_type", "type": "S" },
+      { "name": "type", "type": "S" },
+      { "name": "scope", "type": "S" },
+      { "name": "reason", "type": "S" },
+      { "name": "is_permanent", "type": "N" },
+      { "name": "expires_at", "type": "N" },
+      { "name": "created_at", "type": "N" },
+      { "name": "updated_at", "type": "N" },
+      { "name": "deleted_at", "type": "N" },
+      { "name": "testing", "type": "B" }
+    ]
+  },
+  "users": {
+    "PK": "id",
+    "Fields": [
+      {
+        "name": "id",
+        "type": "S"
+      }
+    ]
+  },
+  "user_blocks": {
+    "PK": "blocker_id",
+    "SK": "sk_scope",
+    "Fields": [
+      { "name": "id", "type": "S" },
+      { "name": "blocked_id", "type": "S" },
+      { "name": "blocker_id", "type": "S" },
+      { "name": "gpk", "type": "S" },
+      { "name": "sk_scope", "type": "S" },
+      { "name": "scope", "type": "S" },
+      { "name": "is_permanent", "type": "N" },
+      { "name": "flag", "type": "S" },
+      { "name": "reason", "type": "S" },
+      { "name": "expires_at", "type": "N" },
+      { "name": "created_at", "type": "N" },
+      { "name": "updated_at", "type": "N" },
+      { "name": "deleted_at", "type": "N" },
+      { "name": "testing", "type": "B" }
+
+    ],
+    "GSI": [
+      {
+        "name": "blocked_id-scope-index",
+        "PK": "blocked_id",
+        "SK": "scope"
+      },
+      {
+        "name": "blocked_id-isperm-index",
+        "PK": "blocked_id",
+        "SK": "is_permanent"
+      },
+      {
+        "name": "blocker_id-created_at-index",
+        "PK": "blocker_id",
+        "SK": "created_at"
+      },
+      {
+        "name": "blocker_id-updated_at-index",
+        "PK": "blocker_id",
+        "SK": "updated_at"
+      },
+      {
+        "name": "global-created_at-index",
+        "PK": "gpk",
+        "SK": "created_at"
+      },
+      {
+        "name": "global-updated_at-index",
+        "PK": "gpk",
+        "SK": "updated_at"
+      },
+      {
+        "name": "id-index",
+        "PK": "id"
+      }
+    ]
+  }
+}

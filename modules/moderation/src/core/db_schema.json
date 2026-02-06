@@ -1,0 +1,85 @@
+{
+    "moderation": {
+        "TableName": "moderation",
+        "PK": "pk",
+        "SK": "sk",
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeTypes": {
+            "pk": "S",
+            "sk": "S",
+            "status": "S",
+            "submittedAt": "N",
+            "userId": "S",
+            "dayKey": "S",
+            "priority": "S",
+            "type": "S",
+            "moderationId": "S",
+            "statusSubmittedAt": "S"
+        },
+        "GlobalSecondaryIndexes": [
+            {
+                "IndexName": "GSI_StatusDate",
+                "KeySchema": [
+                    { "AttributeName": "status", "KeyType": "HASH" },
+                    { "AttributeName": "submittedAt", "KeyType": "RANGE" }
+                ],
+                "Projection": {
+                    "ProjectionType": "INCLUDE",
+                    "NonKeyAttributes": ["moderationId", "userId", "priority", "type"]
+                }
+            },
+            {
+                "IndexName": "GSI_UserStatusDate",
+                "KeySchema": [
+                    { "AttributeName": "userId", "KeyType": "HASH" },
+                    { "AttributeName": "statusSubmittedAt", "KeyType": "RANGE" }
+                ],
+                "Projection": {
+                    "ProjectionType": "INCLUDE",
+                    "NonKeyAttributes": ["moderationId", "priority", "type", "submittedAt", "status"]
+                }
+            },
+            {
+                "IndexName": "GSI_AllByDate",
+                "KeySchema": [
+                    { "AttributeName": "dayKey", "KeyType": "HASH" },
+                    { "AttributeName": "submittedAt", "KeyType": "RANGE" }
+                ],
+                "Projection": {
+                    "ProjectionType": "INCLUDE",
+                    "NonKeyAttributes": ["moderationId", "userId", "status", "priority", "type"]
+                }
+            },
+            {
+                "IndexName": "GSI_Priority",
+                "KeySchema": [
+                    { "AttributeName": "priority", "KeyType": "HASH" },
+                    { "AttributeName": "submittedAt", "KeyType": "RANGE" }
+                ],
+                "Projection": {
+                    "ProjectionType": "INCLUDE",
+                    "NonKeyAttributes": ["moderationId", "userId", "status", "type"]
+                }
+            },
+            {
+                "IndexName": "GSI_TypeDate",
+                "KeySchema": [
+                    { "AttributeName": "type", "KeyType": "HASH" },
+                    { "AttributeName": "submittedAt", "KeyType": "RANGE" }
+                ],
+                "Projection": {
+                    "ProjectionType": "INCLUDE",
+                    "NonKeyAttributes": ["moderationId", "userId", "status", "priority"]
+                }
+            },
+            {
+                "IndexName": "GSI_ByModerationId",
+                "KeySchema": [
+                    { "AttributeName": "moderationId", "KeyType": "HASH" },
+                    { "AttributeName": "userId", "KeyType": "RANGE" }
+                ],
+                "Projection": { "ProjectionType": "KEYS_ONLY" }
+            }
+        ]
+    }
+}

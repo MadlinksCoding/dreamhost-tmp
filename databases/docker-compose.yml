@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: local-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: app_admin
+      POSTGRES_PASSWORD: app_admin_pw
+      POSTGRES_DB: app_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - "./pgdata:/var/lib/postgresql/data"
+      - "./initdb:/docker-entrypoint-initdb.d"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app_admin -d app_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  scylla:
+    image: scylladb/scylla:latest
+    container_name: local-scylla
+    restart: unless-stopped
+    command:
+      - --smp=1
+      - --memory=750M
+      - --alternator-port=8000
+      - --alternator-write-isolation=always
+      - --alternator-address=0.0.0.0
+    ports:
+      - "9042:9042"  # CQL port
+      - "9180:9180"  # Prometheus metrics
+      - "8000:8000"  # Alternator (DynamoDB API)
+    volumes:
+      - scylla_data:/var/lib/scylla
+    healthcheck:
+      test: ["CMD-SHELL", "nodetool status || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+  
+
+volumes:
+  scylla_data:
+
+
+

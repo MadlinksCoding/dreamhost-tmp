@@ -1,0 +1,1890 @@
+# Comprehensive Jest Test Scenarios for Moderation Class
+
+## Methods Overview
+
+### Public Methods
+1. `createModerationSchema()` - Creates DynamoDB table with all GSIs
+2. `generateModerationId()` - Generates unique UUID for moderation entries
+3. `dayKeyFromTs(ts)` - Converts timestamp to YYYYMMDD format
+4. `statusSubmittedAtKey(status, ts)` - Creates composite key for GSI
+5. `createModerationEntry(data, timestamp?)` - Creates new moderation entry
+6. `updateModerationEntry(moderationId, updates, userId)` - Updates existing entry
+7. `addNote(moderationId, userId, note, addedBy)` - Adds note to moderation item
+8. `applyModerationAction(moderationId, userId, action, moderatorId, reason?, note?, publicNote?, moderationType?)` - Applies moderation action
+9. `escalateModerationItem(moderationId, userId, escalatedBy)` - Escalates item
+10. `getModerationItems(filters, options)` - Unified query with multiple filters
+11. `getModerationItemsByStatus(status, options)` - Query by status
+12. `getAllByDate(dayKey, options)` - Query by day partition
+13. `getUserModerationItemsByStatus(userId, status, options)` - User-specific query
+14. `getModerationItemsByPriority(priority, options)` - Query by priority
+15. `getModerationItemsByType(type, options)` - Query by type
+16. `getModerationRecordById(moderationId, userId, includeDeleted?)` - Get single record
+17. `updateModerationMeta(moderationId, userId, metaUpdates)` - Update meta field
+18. `softDeleteModerationItem(moderationId, userId?)` - Soft delete
+19. `hardDeleteModerationItem(moderationId, userId?)` - Hard delete
+20. `countModerationItemsByStatus(status, filters?)` - Count with filters
+21. `getAllModerationCounts()` - Aggregate counts for all statuses
+
+### Private/Helper Methods (test via public interface)
+- `_getCurrentTimestamp()` - Timestamp generation
+- `_validateTimestamp(timestamp)` - Timestamp validation
+- `_sanitizeString(str)` - String sanitization
+- `_validateModerationIdFormat(moderationId)` - UUID validation
+- `_validateModerationData(data)` - Input validation
+- `_validateNoteStructure(note, index)` - Note validation
+- `_buildPartitionKey(userId)` - PK construction
+- `_createMetaField(action, actor, details)` - Meta creation
+- `_updateMetaField(existingMeta, action, actor, details)` - Meta updates
+- `_compressContent(content)` - Content compression
+- `_decompressContent(compressed)` - Content decompression
+- `_decompressItemsContent(item/items)` - Item decompression
+- `_retryOperation(operation)` - Retry with backoff
+- `_encodeNextToken(lastKey)` - Pagination token encoding
+- `_decodeNextToken(token)` - Pagination token decoding
+- `_countPendingResubmission()` - Count pending resubmissions
+
+---
+
+## 1) createModerationSchema()
+
+### PASS Scenarios
+
+1. PASS_createModerationSchema_1: Creates table schema with correct PK (pk: "moderation#<userId>"), SK (sk: "media#<submittedAt>#<moderationId>"), and PAY_PER_REQUEST billing mode. Verifies all required AttributeDefinitions.
+
+2. PASS_createModerationSchema_2: Creates all 10 GSIs with correct configurations:
+- GSI_StatusDate (status/submittedAt)
+- GSI_UserStatusDate (userId/statusSubmittedAt)
+- GSI_AllByDate (dayKey/submittedAt)
+- GSI_Priority (priority/submittedAt)
+- GSI_TypeDate (type/submittedAt)
+- GSI_ByModerationId (moderationId/userId)
+- GSI_ModeratedBy (moderatedBy/submittedAt)
+- GSI_ContentId (contentId/submittedAt)
+- GSI_Escalated (escalatedBy/submittedAt)
+- GSI_ActionedAt (status/actionedAt)
+
+3. PASS_createModerationSchema_3: Idempotent behavior - when table already exists, Scylla.createTable handles gracefully without throwing or creating duplicates.
+
+4. PASS_createModerationSchema_4: Correct projection configurations for each GSI (INCLUDE vs KEYS_ONLY) with appropriate NonKeyAttributes.
+
+### FAIL Scenarios
+
+5. FAIL_createModerationSchema_1: Scylla.createTable throws network error → ErrorHandler.addError called with SCHEMA_CREATION_FAILED code, method re-throws wrapped error.
+
+6. FAIL_createModerationSchema_2: Partial index creation failure (e.g., quota exceeded mid-creation) → surfaces error and ErrorHandler logs it.
+
+7. FAIL_createModerationSchema_3: Retry exhaustion on transient DynamoDB throttling → throws after max retries.
+
+8. FAIL_createModerationSchema_4: Invalid schema configuration (malformed AttributeDefinitions) → throws validation error.
+
+---
+
+## 2) generateModerationId()
+
+### PASS Scenarios
+
+9. PASS_generateModerationId_1: Returns non-empty string value.
+
+10. PASS_generateModerationId_2: Generated value matches UUID v4 format (8-4-4-4-12 hex pattern).
+
+11. PASS_generateModerationId_3: Uniqueness test - 10,000 sequential calls produce 10,000 unique IDs (no duplicates).
+
+12. PASS_generateModerationId_4: Can be used immediately in createModerationEntry without validation errors.
+
+13. PASS_generateModerationId_5: Returns lowercase UUID (if code normalizes to lowercase).
+
+### FAIL Scenarios
+
+14. FAIL_generateModerationId_1: Mock crypto.randomUUID to throw → catches error, logs via ErrorHandler, re-throws.
+
+15. FAIL_generateModerationId_2: Mock crypto.randomUUID to return invalid format → validation catches downstream.
+
+16. FAIL_generateModerationId_3: Environment without crypto support → throws meaningful error.
+
+---
+
+## 3) dayKeyFromTs(ts)
+
+### PASS Scenarios
+
+17. PASS_dayKeyFromTs_1: Valid epoch milliseconds (1640995200000 = 2022-01-01 00:00:00 UTC) returns "20220101".
+
+18. PASS_dayKeyFromTs_2: Accepts numeric string "1640995200000" and converts correctly.
+
+19. PASS_dayKeyFromTs_3: Timestamp at end of day (23:59:59.999) returns correct dayKey for that calendar date.
+
+20. PASS_dayKeyFromTs_4: Timestamp at start of day (00:00:00.000) returns correct dayKey.
+
+21. PASS_dayKeyFromTs_5: Leap year Feb 29 (1582934400000 = 2020-02-29) returns "20200229".
+
+22. PASS_dayKeyFromTs_6: Date changes across timezone boundaries (UTC vs local) - test assumes UTC interpretation.
+
+23. PASS_dayKeyFromTs_7: Current Date.now() returns today's YYYYMMDD correctly.
+
+### FAIL Scenarios
+
+24. FAIL_dayKeyFromTs_1: `null` input → SafeUtils.sanitizeInteger returns null → ErrorHandler logs, throws "Invalid timestamp".
+
+25. FAIL_dayKeyFromTs_2: `undefined` input → throws invalid timestamp error.
+
+26. FAIL_dayKeyFromTs_3: Non-numeric string "abc" → sanitization fails → throws.
+
+27. FAIL_dayKeyFromTs_4: Negative number -123456789 → throws.
+
+28. FAIL_dayKeyFromTs_5: Extremely large number beyond reasonable date range (9999999999999999) → may overflow Date constructor.
+
+29. FAIL_dayKeyFromTs_6: Float/decimal timestamp 1640995200000.567 → sanitizeInteger may truncate, verify behavior.
+
+30. FAIL_dayKeyFromTs_7: Zero timestamp (0 = 1970-01-01) → valid but edge case to verify.
+
+31. FAIL_dayKeyFromTs_8: Object {valueOf: () => 12345} → type coercion attempt rejected by sanitization.
+
+---
+
+## 4) statusSubmittedAtKey(status, ts)
+
+### PASS Scenarios
+
+32. PASS_statusSubmittedAtKey_1: Valid status "pending" + timestamp 1640995200000 returns "pending#1640995200000".
+
+33. PASS_statusSubmittedAtKey_2: Different statuses ("approved", "rejected", "escalated") with same timestamp produce unique keys.
+
+34. PASS_statusSubmittedAtKey_3: Same status with different timestamps produces different keys.
+
+35. PASS_statusSubmittedAtKey_4: Status with leading/trailing whitespace gets sanitized correctly.
+
+36. PASS_statusSubmittedAtKey_5: Timestamp as numeric string "1640995200000" works correctly.
+
+37. PASS_statusSubmittedAtKey_6: All STATUS enum values produce valid keys.
+
+### FAIL Scenarios
+
+38. FAIL_statusSubmittedAtKey_1: Invalid status "unknown" not in STATUS_SET → throws validation error.
+
+39. FAIL_statusSubmittedAtKey_2: Empty string status "" → sanitization returns null → throws.
+
+40. FAIL_statusSubmittedAtKey_3: Null status → throws.
+
+41. FAIL_statusSubmittedAtKey_4: Invalid timestamp (negative, null, "abc") → throws.
+
+42. FAIL_statusSubmittedAtKey_5: Prototype pollution attempt status "__proto__" → rejected, no prototype mutation.
+
+43. FAIL_statusSubmittedAtKey_6: Status with special characters "pending#injection" → sanitized but then validation should catch if not in SET.
+
+44. FAIL_statusSubmittedAtKey_7: Object as status {toString: () => "pending"} → type check fails.
+
+---
+
+## 5) createModerationEntry(data, timestamp?)
+
+### PASS Scenarios
+
+45. PASS_createModerationEntry_1: Minimal valid data (userId, contentId, type, priority) creates entry successfully, returns moderationId.
+
+46. PASS_createModerationEntry_2: Explicit timestamp parameter sets submittedAt to provided value.
+
+47. PASS_createModerationEntry_3: No timestamp provided → uses Date.now() for submittedAt.
+
+48. PASS_createModerationEntry_4: Large content string (50KB+) gets compressed via _compressContent, stored as Buffer/base64.
+
+49. PASS_createModerationEntry_5: Pre-approved content (isPreApproved: true) sets status to "approved" instead of "pending".
+
+50. PASS_createModerationEntry_6: System-generated content (isSystemGenerated: true) sets flag correctly.
+
+51. PASS_createModerationEntry_7: Meta field initialized with action="create", actor=userId, history array started, version=1.
+
+52. PASS_createModerationEntry_8: notes array provided and within MAX_NOTES_PER_ITEM limit → stored correctly.
+
+53. PASS_createModerationEntry_9: All type enums (image, video, text, link, report, tags, emoji, icon, tag, personal_tag, global_tag, image_gallery, gallery, audio) accepted.
+
+54. PASS_createModerationEntry_10: All priority enums (high, normal, urgent, low) accepted.
+
+55. PASS_createModerationEntry_11: Custom moderationId provided → validates format, checks for duplicates via GSI_BY_MOD_ID, uses provided ID if unique.
+
+56. PASS_createModerationEntry_12: dayKey generated correctly as YYYYMMDD from submittedAt.
+
+57. PASS_createModerationEntry_13: statusSubmittedAt composite key created correctly.
+
+58. PASS_createModerationEntry_14: PK format "moderation#<userId>", SK format "media#<submittedAt>#<moderationId>".
+
+59. PASS_createModerationEntry_15: Empty content field → stored as null.
+
+60. PASS_createModerationEntry_16: Logs "moderationCreated" action via Logger.writeLog with MODERATIONS flag.
+
+61. PASS_createModerationEntry_17: ConditionExpression ensures PK/SK uniqueness, prevents silent overwrite.
+
+62. PASS_createModerationEntry_18: Soft delete fields (isDeleted: false, deletedAt: null) initialized.
+
+### FAIL Scenarios
+
+63. FAIL_createModerationEntry_1: Missing required field userId → _validateModerationData throws, ErrorHandler logs INVALID_MODERATION_DATA.
+
+64. FAIL_createModerationEntry_2: Missing contentId → throws.
+
+65. FAIL_createModerationEntry_3: Missing type → throws.
+
+66. FAIL_createModerationEntry_4: Missing priority → throws.
+
+67. FAIL_createModerationEntry_5: Invalid type "invalid_type" not in TYPE_SET → throws.
+
+68. FAIL_createModerationEntry_6: Invalid status explicitly provided → throws.
+
+69. FAIL_createModerationEntry_7: Invalid priority "super_high" not in PRIORITY_SET → throws.
+
+70. FAIL_createModerationEntry_8: Invalid timestamp -1000 → throws "Invalid timestamp: must be positive integer".
+
+71. FAIL_createModerationEntry_9: Timestamp more than 5 years in past → throws "Timestamp too far in the past".
+
+72. FAIL_createModerationEntry_10: Timestamp more than 5 minutes in future → throws "Timestamp in the future beyond clock skew tolerance".
+
+73. FAIL_createModerationEntry_11: Duplicate PK/SK collision → ConditionalCheckFailedException → logs MODERATION_ENTRY_ALREADY_EXISTS, throws.
+
+74. FAIL_createModerationEntry_12: Duplicate moderationId provided → GSI query finds existing → throws "ModerationId already exists".
+
+75. FAIL_createModerationEntry_13: Scylla.putItem fails with throttling → retries exhausted → throws.
+
+76. FAIL_createModerationEntry_14: Malformed data with prototype pollution payload `{__proto__: {isAdmin: true}}` → SafeUtils prevents mutation.
+
+77. FAIL_createModerationEntry_15: Notes array exceeds MAX_NOTES_PER_ITEM (51 notes) → throws "Notes array exceeds maximum limit".
+
+78. FAIL_createModerationEntry_16: Individual note exceeds MAX_NOTE_LENGTH (5001 chars) → _validateNoteStructure throws.
+
+79. FAIL_createModerationEntry_17: Note missing required fields (text, addedAt, addedBy) → _validateNoteStructure throws.
+
+80. FAIL_createModerationEntry_18: Empty userId after sanitization (whitespace only "   ") → throws "Invalid userId: cannot be empty".
+
+81. FAIL_createModerationEntry_19: Non-object data parameter (string, array, null) → throws.
+
+82. FAIL_createModerationEntry_20: Content compression fails (mocked gzip failure) → throws compression error.
+
+---
+
+## 6) updateModerationEntry(moderationId, updates, userId)
+
+### PASS Scenarios
+
+83. PASS_updateModerationEntry_1: Updates allowed fields (contentId, contentType, mediaType, priority, type) successfully.
+
+84. PASS_updateModerationEntry_2: Optimistic locking succeeds on first attempt with version check.
+
+85. PASS_updateModerationEntry_3: Optimistic locking retries after version conflict, succeeds on 2nd attempt.
+
+86. PASS_updateModerationEntry_4: Updates isSystemGenerated boolean correctly (true/false).
+
+87. PASS_updateModerationEntry_5: Updates isPreApproved boolean correctly.
+
+88. PASS_updateModerationEntry_6: Updating status also updates derived fields (statusSubmittedAt, actionedAt if applicable).
+
+89. PASS_updateModerationEntry_7: Large content update triggers compression path, maintains integrity.
+
+90. PASS_updateModerationEntry_8: Meta field updated with new history entry, version incremented.
+
+91. PASS_updateModerationEntry_9: Logs "moderationUpdated" with list of updated fields via Logger.writeLog.
+
+92. PASS_updateModerationEntry_10: Partial update (only 1-2 fields) doesn't overwrite other fields.
+
+93. PASS_updateModerationEntry_11: Notes array update validates length limit and structure.
+
+94. PASS_updateModerationEntry_12: Unknown fields in updates object are ignored (or explicitly rejected based on implementation).
+
+95. PASS_updateModerationEntry_13: Decompresses existing content before comparison/update logic.
+
+96. PASS_updateModerationEntry_14: Requires userId parameter for consistent read via PK/SK.
+
+97. PASS_updateModerationEntry_15: Action field update validates against ACTION_SET.
+
+98. PASS_updateModerationEntry_16: Soft delete fields can be updated (isDeleted, deletedAt) with consistency checks.
+
+### FAIL Scenarios
+
+99. FAIL_updateModerationEntry_1: Missing moderationId parameter → throws "moderationId is required".
+
+100. FAIL_updateModerationEntry_2: Blank moderationId after sanitization → throws.
+
+101. FAIL_updateModerationEntry_3: Invalid moderationId format (not UUID) → _validateModerationIdFormat throws.
+
+102. FAIL_updateModerationEntry_4: Missing userId parameter → throws "userId is required for updateModerationEntry".
+
+103. FAIL_updateModerationEntry_5: Empty userId after sanitization → throws.
+
+104. FAIL_updateModerationEntry_6: Updates parameter not an object (string/array/null) → throws "Updates must be an object".
+
+105. FAIL_updateModerationEntry_7: Invalid enum value in updates.priority → throws "Invalid priority".
+
+106. FAIL_updateModerationEntry_8: Invalid enum value in updates.type → throws "Invalid type".
+
+107. FAIL_updateModerationEntry_9: Invalid enum value in updates.action → throws.
+
+108. FAIL_updateModerationEntry_10: Optimistic locking exceeds max retries (5) → throws "concurrent modification" error.
+
+109. FAIL_updateModerationEntry_11: Moderation item not found for given moderationId+userId → throws "Moderation item not found".
+
+110. FAIL_updateModerationEntry_12: Scylla.updateItem fails with conditional check failure → retries → exhausts → throws.
+
+111. FAIL_updateModerationEntry_13: Scylla query failure on GSI_BY_MOD_ID lookup → retries → throws.
+
+112. FAIL_updateModerationEntry_14: Notes array exceeds MAX_NOTES_PER_ITEM → throws.
+
+113. FAIL_updateModerationEntry_15: Individual note validation fails → throws.
+
+114. FAIL_updateModerationEntry_16: Inconsistent delete flags (isDeleted=true but deletedAt=null) → throws validation error.
+
+115. FAIL_updateModerationEntry_17: Attempt to update immutable fields (submittedAt, moderationId) → silently ignored or throws.
+
+116. FAIL_updateModerationEntry_18: Content decompression fails on existing item → throws.
+
+117. FAIL_updateModerationEntry_19: Prototype pollution in updates object → prevented by SafeUtils.
+
+---
+
+## 7) addNote(moderationId, userId, note, addedBy)
+
+### PASS Scenarios
+
+118. PASS_addNote_1: First note added to empty notes array, structure includes {text, addedBy, addedAt}.
+
+119. PASS_addNote_2: Note text trimmed and sanitized, preserves valid content.
+
+120. PASS_addNote_3: Subsequent note appended to existing notes array, increments noteCount.
+
+121. PASS_addNote_4: Enforces MAX_NOTES_PER_ITEM (50) - adding 50th note succeeds.
+
+122. PASS_addNote_5: Meta field updated with "noteAdded" action in history.
+
+123. PASS_addNote_6: Note with maximum allowed length (MAX_NOTE_LENGTH = 5000 chars) accepted.
+
+124. PASS_addNote_7: HTML/special characters in note sanitized properly.
+
+125. PASS_addNote_8: Optimistic locking ensures concurrent note additions don't conflict.
+
+126. PASS_addNote_9: Logs "noteAdded" action via Logger.writeLog.
+
+### FAIL Scenarios
+
+127. FAIL_addNote_1: Missing moderationId → throws.
+
+128. FAIL_addNote_2: Missing userId → throws.
+
+129. FAIL_addNote_3: Missing note parameter → throws.
+
+130. FAIL_addNote_4: Missing addedBy parameter → throws.
+
+131. FAIL_addNote_5: Invalid moderationId format → throws.
+
+132. FAIL_addNote_6: Empty note after sanitization/trim → throws "Note text cannot be empty".
+
+133. FAIL_addNote_7: Note length exceeds MAX_NOTE_LENGTH (5001 chars) → throws "Note text exceeds maximum length".
+
+134. FAIL_addNote_8: Moderation record not found → throws "Moderation item not found".
+
+135. FAIL_addNote_9: Notes array already at MAX_NOTES_PER_ITEM (50), adding 51st → throws "Maximum notes limit reached".
+
+136. FAIL_addNote_10: Scylla.updateItem fails → retries → throws.
+
+137. FAIL_addNote_11: Optimistic locking exceeds retries → throws.
+
+138. FAIL_addNote_12: Note is null after sanitization → throws.
+
+139. FAIL_addNote_13: addedBy is empty string → throws validation error.
+
+---
+
+## 8) applyModerationAction(moderationId, userId, action, moderatorId, reason?, note?, publicNote?, moderationType?)
+
+### PASS Scenarios
+
+140. PASS_applyModerationAction_1: Action "approve" sets status to "approved", actionedAt to current timestamp.
+
+141. PASS_applyModerationAction_2: Action "reject" sets status to "rejected", stores sanitized reason.
+
+142. PASS_applyModerationAction_3: Action "pending_resubmission" sets action field correctly, status remains "pending".
+
+143. PASS_applyModerationAction_4: moderationType="global" triggers status "approved_global" instead of "approved".
+
+144. PASS_applyModerationAction_5: moderationType="standard" uses regular "approved" status.
+
+145. PASS_applyModerationAction_6: Optional note parameter adds note to notes array.
+
+146. PASS_applyModerationAction_7: Optional publicNote parameter stored in meta or separate field.
+
+147. PASS_applyModerationAction_8: Meta field history entry includes actor=moderatorId, action, previousStatus, timestamp.
+
+148. PASS_applyModerationAction_9: Logs "moderationActioned" with action type via Logger.writeLog.
+
+149. PASS_applyModerationAction_10: Concurrent moderator attempts - only one succeeds due to optimistic locking.
+
+150. PASS_applyModerationAction_11: Reason text sanitized and trimmed before storage.
+
+151. PASS_applyModerationAction_12: statusSubmittedAt updated to reflect new status.
+
+152. PASS_applyModerationAction_13: Updates moderatedBy field to moderatorId.
+
+153. PASS_applyModerationAction_14: Decompresses existing content before action logic.
+
+### FAIL Scenarios
+
+154. FAIL_applyModerationAction_1: Missing moderationId → throws.
+
+155. FAIL_applyModerationAction_2: Missing userId → throws.
+
+156. FAIL_applyModerationAction_3: Missing action → throws.
+
+157. FAIL_applyModerationAction_4: Missing moderatorId → throws.
+
+158. FAIL_applyModerationAction_5: Invalid moderationId format → throws.
+
+159. FAIL_applyModerationAction_6: Invalid action enum (not in ACTION_SET) → throws.
+
+160. FAIL_applyModerationAction_7: Invalid moderationType (not "standard" or "global") → throws.
+
+161. FAIL_applyModerationAction_8: Reason text exceeds reasonable limit (e.g., 10000 chars) → throws or truncates.
+
+162. FAIL_applyModerationAction_9: Action/status inconsistency (action="approve" but manually setting status="rejected") → throws validation error.
+
+163. FAIL_applyModerationAction_10: Moderation item not found → throws.
+
+164. FAIL_applyModerationAction_11: Scylla.updateItem fails → throws.
+
+165. FAIL_applyModerationAction_12: Optimistic locking fails after max retries → throws.
+
+166. FAIL_applyModerationAction_13: Note parameter exceeds MAX_NOTE_LENGTH → throws.
+
+167. FAIL_applyModerationAction_14: Empty moderatorId after sanitization → throws.
+
+168. FAIL_applyModerationAction_15: Prototype pollution in reason or note → prevented.
+
+---
+
+## 9) escalateModerationItem(moderationId, userId, escalatedBy)
+
+### PASS Scenarios
+
+169. PASS_escalateModerationItem_1: Sets status to "escalated", escalatedBy field to provided value.
+
+170. PASS_escalateModerationItem_2: Preserves all previous fields and history, appends escalation entry to meta.
+
+171. PASS_escalateModerationItem_3: Idempotent - escalating already escalated item doesn't duplicate history or cause errors.
+
+172. PASS_escalateModerationItem_4: Updates actionedAt to current timestamp.
+
+173. PASS_escalateModerationItem_5: Updates statusSubmittedAt to reflect escalated status.
+
+174. PASS_escalateModerationItem_6: Meta history includes previousStatus and previousEscalatedBy.
+
+175. PASS_escalateModerationItem_7: Logs "itemEscalated" action via Logger.writeLog.
+
+176. PASS_escalateModerationItem_8: Optimistic locking with version check succeeds.
+
+177. PASS_escalateModerationItem_9: Decompresses content if compressed.
+
+### FAIL Scenarios
+
+178. FAIL_escalateModerationItem_1: Missing moderationId → throws.
+
+179. FAIL_escalateModerationItem_2: Missing userId → throws.
+
+180. FAIL_escalateModerationItem_3: Missing escalatedBy → throws.
+
+181. FAIL_escalateModerationItem_4: Invalid moderationId format → throws.
+
+182. FAIL_escalateModerationItem_5: Empty escalatedBy after sanitization → throws.
+
+183. FAIL_escalateModerationItem_6: Item not found → throws "Moderation item not found".
+
+184. FAIL_escalateModerationItem_7: Scylla.updateItem fails → throws.
+
+185. FAIL_escalateModerationItem_8: Optimistic locking exceeds retries → throws "concurrent modification".
+
+186. FAIL_escalateModerationItem_9: GSI query failure on item lookup → throws.
+
+---
+
+## 10) getModerationItems(filters, options)
+
+### PASS Scenarios
+
+187. PASS_getModerationItems_1: No filters, no options → returns default 20 items from primary table.
+
+188. PASS_getModerationItems_2: Filter by status only → uses GSI_STATUS_DATE.
+
+189. PASS_getModerationItems_3: Filter by userId + status → uses GSI_USER_STATUS_DATE.
+
+190. PASS_getModerationItems_4: Filter by dayKey → uses GSI_ALL_BY_DATE.
+
+191. PASS_getModerationItems_5: Filter by priority → uses GSI_PRIORITY.
+
+192. PASS_getModerationItems_6: Filter by type → uses GSI_TYPE_DATE.
+
+193. PASS_getModerationItems_7: Combination filters (userId + status + date range) → correct index chosen, FilterExpression applied.
+
+194. PASS_getModerationItems_8: Pagination with nextToken → decodes token, passes ExclusiveStartKey, returns next page.
+
+195. PASS_getModerationItems_9: Date range filters (start + end) → BETWEEN expression applied.
+
+196. PASS_getModerationItems_10: Only start timestamp → uses >= expression.
+
+197. PASS_getModerationItems_11: Only end timestamp → uses <= expression.
+
+198. PASS_getModerationItems_12: Sort ascending (asc=true) → ScanIndexForward=true.
+
+199. PASS_getModerationItems_13: Sort descending (asc=false, default) → ScanIndexForward=false.
+
+200. PASS_getModerationItems_14: Limit enforced (limit=50) → returns max 50 items.
+
+201. PASS_getModerationItems_15: Decompresses all items with compressed content.
+
+202. PASS_getModerationItems_16: Empty result set → returns {items: [], nextToken: null, hasMore: false}.
+
+203. PASS_getModerationItems_17: Response includes count field matching items length.
+
+204. PASS_getModerationItems_18: Logs debug info on success.
+
+### FAIL Scenarios
+
+205. FAIL_getModerationItems_1: Invalid status enum → throws "Invalid status".
+
+206. FAIL_getModerationItems_2: Invalid priority enum → throws "Invalid priority".
+
+207. FAIL_getModerationItems_3: Invalid type enum → throws "Invalid type".
+
+208. FAIL_getModerationItems_4: Invalid dayKey format (not YYYYMMDD) → throws "Invalid dayKey format".
+
+209. FAIL_getModerationItems_5: dayKey represents invalid calendar date (20221399) → throws "Invalid dayKey: does not represent a valid calendar date".
+
+210. FAIL_getModerationItems_6: Limit exceeds MAX_QUERY_RESULT_SIZE (1001) → throws "Query limit cannot exceed 1000".
+
+211. FAIL_getModerationItems_7: Invalid nextToken (not base64, corrupted) → throws decoding error.
+
+212. FAIL_getModerationItems_8: nextToken expired (TTL check) → throws "Pagination token expired".
+
+213. FAIL_getModerationItems_9: nextToken too large (>100KB) → throws "Token too large".
+
+214. FAIL_getModerationItems_10: Scylla query fails → retries → throws.
+
+215. FAIL_getModerationItems_11: No suitable index for filter combination → throws "No suitable index".
+
+216. FAIL_getModerationItems_12: Timestamp validation fails (negative start/end) → throws.
+
+217. FAIL_getModerationItems_13: Content decompression fails on one item → throws.
+
+---
+
+## 11) getModerationItemsByStatus(status, options)
+
+### PASS Scenarios
+
+218. PASS_getModerationItemsByStatus_1: Valid status "pending" → uses GSI_STATUS_DATE, returns items.
+
+219. PASS_getModerationItemsByStatus_2: All STATUS enum values work (pending, approved, approved_global, rejected, escalated).
+
+220. PASS_getModerationItemsByStatus_3: Date range filtering (start/end) applied correctly via KeyConditionExpression.
+
+221. PASS_getModerationItemsByStatus_4: Pagination works with nextToken encode/decode.
+
+222. PASS_getModerationItemsByStatus_5: Limit parameter enforced.
+
+223. PASS_getModerationItemsByStatus_6: Sort order (asc) respected.
+
+224. PASS_getModerationItemsByStatus_7: Decompresses content in all items.
+
+225. PASS_getModerationItemsByStatus_8: Empty result for status with no items → returns empty array.
+
+226. PASS_getModerationItemsByStatus_9: Logs success with count.
+
+### FAIL Scenarios
+
+227. FAIL_getModerationItemsByStatus_1: Invalid status "unknown" → throws "Invalid status".
+
+228. FAIL_getModerationItemsByStatus_2: Empty status after sanitization → throws "status is required".
+
+229. FAIL_getModerationItemsByStatus_3: Null status → throws.
+
+230. FAIL_getModerationItemsByStatus_4: Limit > MAX_QUERY_RESULT_SIZE → throws.
+
+231. FAIL_getModerationItemsByStatus_5: Invalid nextToken → throws.
+
+232. FAIL_getModerationItemsByStatus_6: Scylla query fails → throws.
+
+233. FAIL_getModerationItemsByStatus_7: Invalid start/end timestamps → throws.
+
+---
+
+## 12) getAllByDate(dayKey, options)
+
+### PASS Scenarios
+
+234. PASS_getAllByDate_1: Valid dayKey "20220101" → uses GSI_ALL_BY_DATE, returns items for that day.
+
+235. PASS_getAllByDate_2: Leap year dayKey "20200229" → works correctly.
+
+236. PASS_getAllByDate_3: Date range filtering within the day (start/end timestamps) applied.
+
+237. PASS_getAllByDate_4: Pagination with nextToken.
+
+238. PASS_getAllByDate_5: Limit parameter enforced.
+
+239. PASS_getAllByDate_6: Sort order respected.
+
+240. PASS_getAllByDate_7: Decompresses content.
+
+241. PASS_getAllByDate_8: Empty result for future date → returns empty array.
+
+### FAIL Scenarios
+
+242. FAIL_getAllByDate_1: Missing dayKey → throws "dayKey is required".
+
+243. FAIL_getAllByDate_2: Invalid dayKey format "2022-01-01" → throws "Invalid dayKey format. Expected YYYYMMDD".
+
+244. FAIL_getAllByDate_3: Invalid calendar date "20221399" → throws "does not represent a valid calendar date".
+
+245. FAIL_getAllByDate_4: dayKey with invalid month "20221300" → throws.
+
+246. FAIL_getAllByDate_5: dayKey with invalid day "20220132" → throws.
+
+247. FAIL_getAllByDate_6: Limit > MAX_QUERY_RESULT_SIZE → throws.
+
+248. FAIL_getAllByDate_7: Invalid nextToken → throws.
+
+249. FAIL_getAllByDate_8: Scylla query fails → throws.
+
+---
+
+## 13) getUserModerationItemsByStatus(userId, status, options)
+
+### PASS Scenarios
+
+250. PASS_getUserModerationItemsByStatus_1: Valid userId + status → uses GSI_USER_STATUS_DATE, returns only that user's items.
+
+251. PASS_getUserModerationItemsByStatus_2: Status "all" → queries all statuses for user.
+
+252. PASS_getUserModerationItemsByStatus_3: All STATUS enum values work for specific user.
+
+253. PASS_getUserModerationItemsByStatus_4: Date range filtering (start/end) applied via FilterExpression or KeyConditionExpression.
+
+254. PASS_getUserModerationItemsByStatus_5: Pagination works.
+
+255. PASS_getUserModerationItemsByStatus_6: Limit enforced.
+
+256. PASS_getUserModerationItemsByStatus_7: Sort order respected.
+
+257. PASS_getUserModerationItemsByStatus_8: Decompresses content.
+
+258. PASS_getUserModerationItemsByStatus_9: Empty result for user with no items → returns empty array.
+
+259. PASS_getUserModerationItemsByStatus_10: Security boundary - userId filter prevents cross-user data access.
+
+### FAIL Scenarios
+
+260. FAIL_getUserModerationItemsByStatus_1: Missing userId → throws "userId is required".
+
+261. FAIL_getUserModerationItemsByStatus_2: Empty userId after sanitization → throws.
+
+262. FAIL_getUserModerationItemsByStatus_3: Missing status → throws "status is required".
+
+263. FAIL_getUserModerationItemsByStatus_4: Invalid status (not in STATUS_SET or "all") → throws "Invalid status".
+
+264. FAIL_getUserModerationItemsByStatus_5: Limit > MAX_QUERY_RESULT_SIZE → throws.
+
+265. FAIL_getUserModerationItemsByStatus_6: Invalid nextToken → throws.
+
+266. FAIL_getUserModerationItemsByStatus_7: Scylla query fails → throws.
+
+267. FAIL_getUserModerationItemsByStatus_8: Invalid timestamps → throws.
+
+---
+
+## 14) getModerationItemsByPriority(priority, options)
+
+### PASS Scenarios
+
+268. PASS_getModerationItemsByPriority_1: Valid priority "high" → uses GSI_PRIORITY, returns items.
+
+269. PASS_getModerationItemsByPriority_2: All PRIORITY enum values work (high, normal, urgent, low).
+
+270. PASS_getModerationItemsByPriority_3: Date range filtering (start/end) applied.
+
+271. PASS_getModerationItemsByPriority_4: Pagination works.
+
+272. PASS_getModerationItemsByPriority_5: Limit enforced.
+
+273. PASS_getModerationItemsByPriority_6: Sort order respected.
+
+274. PASS_getModerationItemsByPriority_7: Decompresses content.
+
+275. PASS_getModerationItemsByPriority_8: Empty result → returns empty array.
+
+### FAIL Scenarios
+
+276. FAIL_getModerationItemsByPriority_1: Invalid priority "critical" → throws "Invalid priority".
+
+277. FAIL_getModerationItemsByPriority_2: Missing priority → throws "priority is required".
+
+278. FAIL_getModerationItemsByPriority_3: Limit > MAX_QUERY_RESULT_SIZE → throws.
+
+279. FAIL_getModerationItemsByPriority_4: Invalid nextToken → throws.
+
+280. FAIL_getModerationItemsByPriority_5: Scylla query fails → throws.
+
+281. FAIL_getModerationItemsByPriority_6: Invalid timestamps → throws.
+
+---
+
+## 15) getModerationItemsByType(type, options)
+
+### PASS Scenarios
+
+282. PASS_getModerationItemsByType_1: Valid type "image" → uses GSI_TYPE_DATE, returns items.
+
+283. PASS_getModerationItemsByType_2: All TYPE enum values work (image, video, text, link, report, tags, emoji, icon, tag, personal_tag, global_tag, image_gallery, gallery, audio).
+
+284. PASS_getModerationItemsByType_3: Alias handling (gallery vs image_gallery) - both map to same results or one is canonical.
+
+285. PASS_getModerationItemsByType_4: Date range filtering applied.
+
+286. PASS_getModerationItemsByType_5: Pagination works.
+
+287. PASS_getModerationItemsByType_6: Limit enforced.
+
+288. PASS_getModerationItemsByType_7: Sort order respected.
+
+289. PASS_getModerationItemsByType_8: Decompresses content.
+
+290. PASS_getModerationItemsByType_9: Empty result → returns empty array.
+
+### FAIL Scenarios
+
+291. FAIL_getModerationItemsByType_1: Invalid type "pdf" → throws "Invalid type".
+
+292. FAIL_getModerationItemsByType_2: Missing type → throws "type is required".
+
+293. FAIL_getModerationItemsByType_3: Limit > MAX_QUERY_RESULT_SIZE → throws.
+
+294. FAIL_getModerationItemsByType_4: Invalid nextToken → throws.
+
+295. FAIL_getModerationItemsByType_5: Scylla query fails → throws.
+
+296. FAIL_getModerationItemsByType_6: Invalid timestamps → throws.
+
+---
+
+## 16) getModerationRecordById(moderationId, userId, includeDeleted?)
+
+### PASS Scenarios
+
+297. PASS_getModerationRecordById_1: Valid moderationId + userId → uses GSI_BY_MOD_ID, returns single record.
+
+298. PASS_getModerationRecordById_2: includeDeleted=false (default) → excludes soft-deleted records (isDeleted=true).
+
+299. PASS_getModerationRecordById_3: includeDeleted=true → returns soft-deleted record.
+
+300. PASS_getModerationRecordById_4: Returned record has decompressed content field.
+
+301. PASS_getModerationRecordById_5: Uses direct getItem with PK/SK for consistent read after GSI query.
+
+302. PASS_getModerationRecordById_6: Record not found → returns null (not throws).
+
+303. PASS_getModerationRecordById_7: Logs successful retrieval.
+
+### FAIL Scenarios
+
+304. FAIL_getModerationRecordById_1: Missing userId → throws "userId is required for getModerationRecordById".
+
+305. FAIL_getModerationRecordById_2: Missing moderationId → throws "moderationId is required".
+
+306. FAIL_getModerationRecordById_3: Invalid moderationId format (not UUID) → throws validation error.
+
+307. FAIL_getModerationRecordById_4: Empty moderationId after sanitization → throws.
+
+308. FAIL_getModerationRecordById_5: Empty userId after sanitization → throws.
+
+309. FAIL_getModerationRecordById_6: Scylla query on GSI fails → throws.
+
+310. FAIL_getModerationRecordById_7: Scylla getItem fails → throws.
+
+311. FAIL_getModerationRecordById_8: Content decompression fails → throws.
+
+---
+
+## 17) updateModerationMeta(moderationId, userId, metaUpdates)
+
+### PASS Scenarios
+
+312. PASS_updateModerationMeta_1: Appends new history entry to meta.history array (bounded by MAX_HISTORY_ENTRIES).
+
+313. PASS_updateModerationMeta_2: When history reaches MAX_HISTORY_ENTRIES (100), oldest entries trimmed (FIFO or configured policy).
+
+314. PASS_updateModerationMeta_3: Validates and safely stores details object (no prototype pollution).
+
+315. PASS_updateModerationMeta_4: Optimistic locking with version check ensures concurrency safety.
+
+316. PASS_updateModerationMeta_5: Updates contentDeleted flag and contentDeletedAt timestamp when provided.
+
+317. PASS_updateModerationMeta_6: Updates updatedBy field in meta.
+
+318. PASS_updateModerationMeta_7: Increments version number.
+
+319. PASS_updateModerationMeta_8: Logs meta update action.
+
+### FAIL Scenarios
+
+320. FAIL_updateModerationMeta_1: Missing moderationId → throws.
+
+321. FAIL_updateModerationMeta_2: Missing userId → throws.
+
+322. FAIL_updateModerationMeta_3: Invalid moderationId format → throws.
+
+323. FAIL_updateModerationMeta_4: Empty metaUpdates object → may succeed with no changes or throw.
+
+324. FAIL_updateModerationMeta_5: History overflow beyond MAX_HISTORY_ENTRIES - test if it throws or truncates.
+
+325. FAIL_updateModerationMeta_6: Scylla.updateItem fails → throws.
+
+326. FAIL_updateModerationMeta_7: Optimistic locking fails after retries → throws.
+
+327. FAIL_updateModerationMeta_8: Item not found → throws.
+
+328. FAIL_updateModerationMeta_9: Prototype pollution in metaUpdates → prevented by SafeUtils.
+
+---
+
+## 18) softDeleteModerationItem(moderationId, userId?)
+
+### PASS Scenarios
+
+329. PASS_softDeleteModerationItem_1: Sets isDeleted=true and deletedAt=<timestamp>, preserves all other data.
+
+330. PASS_softDeleteModerationItem_2: Idempotent - soft deleting already deleted item returns true consistently (or appropriate response).
+
+331. PASS_softDeleteModerationItem_3: Ensures consistency: deletedAt only set when isDeleted=true.
+
+332. PASS_softDeleteModerationItem_4: Logs soft delete action.
+
+333. PASS_softDeleteModerationItem_5: Meta field updated with soft delete history entry.
+
+334. PASS_softDeleteModerationItem_6: Uses optimistic locking for concurrent safety.
+
+### FAIL Scenarios
+
+335. FAIL_softDeleteModerationItem_1: Missing moderationId → throws.
+
+336. FAIL_softDeleteModerationItem_2: Invalid moderationId format → throws.
+
+337. FAIL_softDeleteModerationItem_3: Empty moderationId after sanitization → throws.
+
+338. FAIL_softDeleteModerationItem_4: Record not found → returns false or throws (document actual behavior).
+
+339. FAIL_softDeleteModerationItem_5: Scylla.updateItem fails → throws.
+
+340. FAIL_softDeleteModerationItem_6: Optimistic locking fails → throws.
+
+341. FAIL_softDeleteModerationItem_7: Inconsistent state attempt (isDeleted=true, deletedAt=null) → validation throws.
+
+---
+
+## 19) hardDeleteModerationItem(moderationId, userId?)
+
+### PASS Scenarios
+
+342. PASS_hardDeleteModerationItem_1: Deletes existing record permanently, returns true.
+
+343. PASS_hardDeleteModerationItem_2: Record not found → returns false (explicitly documented behavior).
+
+344. PASS_hardDeleteModerationItem_3: Logs "itemHardDeleted" action on success.
+
+345. PASS_hardDeleteModerationItem_4: Uses getModerationRecordById to fetch PK/SK before delete.
+
+346. PASS_hardDeleteModerationItem_5: Calls Scylla.deleteItem with correct PK/SK.
+
+### FAIL Scenarios
+
+347. FAIL_hardDeleteModerationItem_1: Missing moderationId → throws.
+
+348. FAIL_hardDeleteModerationItem_2: Invalid moderationId format → throws.
+
+349. FAIL_hardDeleteModerationItem_3: Scylla.deleteItem fails → throws.
+
+350. FAIL_hardDeleteModerationItem_4: getModerationRecordById throws error → propagates throw.
+
+351. FAIL_hardDeleteModerationItem_5: Missing userId when required → throws.
+
+---
+
+## 20) countModerationItemsByStatus(status, filters?)
+
+### PASS Scenarios
+
+352. PASS_countModerationItemsByStatus_1: Counts items for valid status "pending" using Select:"COUNT".
+
+353. PASS_countModerationItemsByStatus_2: Status "all" → counts across entire table with Scan or sum of all status counts.
+
+354. PASS_countModerationItemsByStatus_3: Filters applied (moderatedBy present/null, hasRejectionHistory) via FilterExpression.
+
+355. PASS_countModerationItemsByStatus_4: Paginates count across multiple pages (LastEvaluatedKey loop), sums correctly.
+
+356. PASS_countModerationItemsByStatus_5: Respects MAX_PAGINATION_ITERATIONS protection (100 iterations max).
+
+357. PASS_countModerationItemsByStatus_6: Date range filters (start/end) applied to count query.
+
+358. PASS_countModerationItemsByStatus_7: Marshals values once before pagination loop for efficiency.
+
+359. PASS_countModerationItemsByStatus_8: Empty result → returns 0.
+
+360. PASS_countModerationItemsByStatus_9: Large dataset requiring multiple pages → sums all pages correctly.
+
+### FAIL Scenarios
+
+361. FAIL_countModerationItemsByStatus_1: Invalid status (not in STATUS_SET or "all") → throws "Invalid status".
+
+362. FAIL_countModerationItemsByStatus_2: Pagination exceeds MAX_PAGINATION_ITERATIONS → logs PAGINATION_LIMIT_EXCEEDED, throws with explicit error message.
+
+363. FAIL_countModerationItemsByStatus_3: Scylla query fails → retries → throws.
+
+364. FAIL_countModerationItemsByStatus_4: Filter object contains prototype pollution payload → SafeUtils prevents mutation, count proceeds safely.
+
+365. FAIL_countModerationItemsByStatus_5: Invalid timestamp in date range filters → throws.
+
+366. FAIL_countModerationItemsByStatus_6: moderatedBy filter with invalid value → sanitized but may not match records.
+
+---
+
+## 21) getAllModerationCounts()
+
+### PASS Scenarios
+
+367. PASS_getAllModerationCounts_1: Returns counts object with keys for every status in STATUS enum (pending, approved, approved_global, rejected, escalated).
+
+368. PASS_getAllModerationCounts_2: Includes special count keys: pendingResubmission, all, unmoderated.
+
+369. PASS_getAllModerationCounts_3: All status counts run in parallel via Promise.all, maps results correctly to status keys.
+
+370. PASS_getAllModerationCounts_4: When _countPendingResubmission fails internally, it returns 0 and doesn't crash overall method.
+
+371. PASS_getAllModerationCounts_5: Unmoderated count (pending items with moderatedBy=null) calculated correctly.
+
+372. PASS_getAllModerationCounts_6: All count represents total items across all statuses.
+
+373. PASS_getAllModerationCounts_7: Logs successful count retrieval.
+
+374. PASS_getAllModerationCounts_8: Result ordering matches STATUS enum order.
+
+### FAIL Scenarios
+
+375. FAIL_getAllModerationCounts_1: One of the countModerationItemsByStatus calls rejects → ErrorHandler logs GET_ALL_MODERATION_COUNTS_FAILED, method throws.
+
+376. FAIL_getAllModerationCounts_2: Promise.all shape/ordering bug - status count misaligned with key (regression test).
+
+377. FAIL_getAllModerationCounts_3: Performance guard - if STATUS enum unexpectedly grows, countPromises array size validated (snapshot test).
+
+378. FAIL_getAllModerationCounts_4: _countPendingResubmission throws (not caught) → fails entire operation.
+
+379. FAIL_getAllModerationCounts_5: Scylla transient error on multiple parallel queries → retries → partial failures → throws.
+
+---
+
+## Additional Private Helper Method Tests (via Public Interface)
+
+### _validateTimestamp(timestamp)
+
+**Test via createModerationEntry, updateModerationEntry**
+
+380. PASS_validateTimestamp_1: Valid positive integer timestamp accepted.
+
+381. PASS_validateTimestamp_2: Numeric string "1640995200000" converted and accepted.
+
+382. PASS_validateTimestamp_3: Undefined timestamp → generates current timestamp via Date.now().
+
+383. PASS_validateTimestamp_4: Timestamp within 5-minute future grace period (clock skew) accepted.
+
+384. FAIL_validateTimestamp_1: Negative timestamp → throws "Invalid timestamp: must be positive integer".
+
+385. FAIL_validateTimestamp_2: Timestamp > 5 years old → throws "Timestamp too far in the past".
+
+386. FAIL_validateTimestamp_3: Timestamp > 5 minutes in future → throws "beyond clock skew tolerance".
+
+387. FAIL_validateTimestamp_4: Non-numeric string → throws.
+
+388. FAIL_validateTimestamp_5: Float number → sanitizeInteger may truncate, verify behavior.
+
+389. FAIL_validateTimestamp_6: Infinity, -Infinity → rejected.
+
+---
+
+### _validateModerationIdFormat(moderationId)
+
+**Test via createModerationEntry, updateModerationEntry, getModerationRecordById**
+
+390. PASS_validateModerationIdFormat_1: Valid UUID v4 format accepted.
+
+391. PASS_validateModerationIdFormat_2: Uppercase UUID converted to lowercase (if implementation normalizes).
+
+392. FAIL_validateModerationIdFormat_1: Non-UUID string "abc123" → throws "Invalid moderationId format".
+
+393. FAIL_validateModerationIdFormat_2: UUID with missing dashes → throws.
+
+394. FAIL_validateModerationIdFormat_3: Empty string → throws.
+
+395. FAIL_validateModerationIdFormat_4: Null → throws.
+
+396. FAIL_validateModerationIdFormat_5: UUID v1 (different format) - test if rejected or accepted.
+
+---
+
+### _compressContent / _decompressContent
+
+**Test via createModerationEntry, updateModerationEntry, retrieval methods**
+
+397. PASS_compressContent_1: Large JSON object (50KB+) compresses successfully, size reduced.
+
+398. PASS_compressContent_2: Small content (< 1KB) may not compress or compresses minimally.
+
+399. PASS_compressContent_3: Round-trip: compress then decompress returns identical content.
+
+400. PASS_compressContent_4: Binary content (Buffer) handled correctly.
+
+401. FAIL_compressContent_1: Gzip compression throws error → propagates to caller.
+
+402. FAIL_decompressContent_1: Corrupted gzip data → gunzip throws → propagates error.
+
+403. FAIL_decompressContent_2: Non-compressed data passed to decompress → may throw or return garbage.
+
+---
+
+### _retryOperation(operation)
+
+**Test via all Scylla operations in public methods**
+
+404. PASS_retryOperation_1: Operation succeeds on first attempt → returns result immediately.
+
+405. PASS_retryOperation_2: Operation fails with retryable error (throttling) → retries with exponential backoff → succeeds on 2nd attempt.
+
+406. PASS_retryOperation_3: Retries up to RETRY_MAX_ATTEMPTS (3) before throwing.
+
+407. PASS_retryOperation_4: Non-retryable error (invalid request) → throws immediately without retry.
+
+408. FAIL_retryOperation_1: All retry attempts exhausted → throws last error.
+
+409. FAIL_retryOperation_2: Operation throws non-Error object → handled gracefully or re-throws.
+
+---
+
+### _encodeNextToken / _decodeNextToken
+
+**Test via pagination in query methods**
+
+410. PASS_encodeNextToken_1: Null lastKey → returns null token.
+
+411. PASS_encodeNextToken_2: Valid lastKey object → encodes to base64 string.
+
+412. PASS_encodeNextToken_3: Round-trip: encode then decode returns identical lastKey.
+
+413. PASS_encodeNextToken_4: Token includes TTL metadata for expiration checking.
+
+414. FAIL_decodeNextToken_1: Invalid base64 string → throws decoding error.
+
+415. FAIL_decodeNextToken_2: Token exceeds MAX_PAGINATION_TOKEN_SIZE (100KB) → throws "Token too large".
+
+416. FAIL_decodeNextToken_3: Expired token (TTL > 15 minutes) → throws "Pagination token expired".
+
+417. FAIL_decodeNextToken_4: Token with corrupted gzip data → throws.
+
+418. FAIL_decodeNextToken_5: Token from different table/schema → may cause downstream errors.
+
+---
+
+## Cross-Cutting Test Categories
+
+### Security / Injection Tests
+
+419. SECURITY_1: Prototype pollution via data objects:
+- `{__proto__: {isAdmin: true}}` in createModerationEntry data
+- `{constructor: {prototype: {isAdmin: true}}}` in updates
+- Deep nested pollution attempts
+- **Expected**: SafeUtils sanitization prevents all prototype chain mutations
+
+420. SECURITY_2: SQL/NoSQL injection attempts:
+- Special characters in userId: `"user'; DROP TABLE--"`
+- Injection in status: `"pending' OR '1'='1"`
+- **Expected**: Sanitization escapes/rejects, no query manipulation
+
+421. SECURITY_3: XSS payloads in content/notes:
+- `<script>alert('xss')</script>` in note text
+- **Expected**: Sanitized on input, safe on output
+
+422. SECURITY_4: Path traversal in string fields:
+- `../../etc/passwd` in contentId
+- **Expected**: Sanitization prevents file system access
+
+423. SECURITY_5: Oversized inputs:
+- nextToken > MAX_PAGINATION_TOKEN_SIZE
+- content > reasonable limit (e.g., 10MB)
+- notes array > MAX_NOTES_PER_ITEM
+- **Expected**: Validation rejects before processing
+
+---
+
+### Dependency Interaction Tests
+
+424. DEP_1: Scylla transient throttling errors:
+- Mock ProvisionedThroughputExceededException
+- **Expected**: Retry mechanism activates, succeeds after backoff
+
+425. DEP_2: Scylla conditional check failures:
+- Mock ConditionalCheckFailedException
+- **Expected**: Optimistic locking retries, eventually succeeds or throws meaningful error
+
+426. DEP_3: Scylla network timeouts:
+- Mock connection timeout
+- **Expected**: Retry with exponential backoff, throws after max attempts
+
+427. DEP_4: Scylla returns malformed response:
+- Mock response with missing Items field
+- **Expected**: Handled gracefully with empty array or throws
+
+428. DEP_5: Logger.writeLog failures:
+- Mock Logger.writeLog to throw
+- **Expected**: Main operation completes, logging error doesn't break flow
+
+429. DEP_6: ErrorHandler.addError failures:
+- Mock ErrorHandler to throw
+- **Expected**: Original error still propagates
+
+---
+
+### Performance-Sensitive Tests
+
+430. PERF_1: Query limit enforcement:
+- Request limit=1001 (> MAX_QUERY_RESULT_SIZE)
+- **Expected**: Throws before query execution
+
+431. PERF_2: Pagination iteration ceiling:
+- Mock result that paginates infinitely
+- **Expected**: Throws at MAX_PAGINATION_ITERATIONS with explicit error
+
+432. PERF_3: Large content handling:
+- 10MB content object in createModerationEntry
+- **Expected**: Compression reduces size, no memory exhaustion
+
+433. PERF_4: Parallel count operations in getAllModerationCounts:
+- All status counts run in parallel
+- **Expected**: Completes in time proportional to slowest query, not sum
+
+434. PERF_5: Content decompression on large result sets:
+- 1000 items each with compressed content
+- **Expected**: Decompression doesn't block event loop, completes reasonably
+
+---
+
+### Logging Correctness Tests
+
+435. LOG_1: Success logging:
+- createModerationEntry → Logger.writeLog called with flag="MODERATIONS", action="moderationCreated"
+- updateModerationEntry → action="moderationUpdated"
+- addNote → action="noteAdded"
+- applyModerationAction → action="moderationActioned"
+- escalateModerationItem → action="itemEscalated"
+- hardDeleteModerationItem → action="itemHardDeleted"
+
+436. LOG_2: Error logging:
+- All ErrorHandler.addError calls include:
+  - Descriptive message
+  - Unique error code
+  - origin (method name)
+  - relevant data object
+- **Expected**: No double-logging of same error
+
+437. LOG_3: Debug logging:
+- All methods start with Logger.debugLog [START]
+- All methods end with Logger.debugLog [SUCCESS] or [ERROR]
+- **Expected**: Consistent log format for tracing
+
+---
+
+### Edge Case Tests
+
+438. EDGE_1: Empty string edge cases:
+- userId = "   " (whitespace only) → sanitized to "" → rejected
+- contentId = "" → may be allowed or rejected depending on validation
+
+439. EDGE_2: Boundary timestamps:
+- Timestamp exactly 5 years ago (boundary)
+- Timestamp exactly 5 minutes in future (boundary)
+- Epoch zero (0)
+- JavaScript max safe integer
+
+440. EDGE_3: Enum edge cases:
+- Type alias: "gallery" vs "image_gallery" 
+- Status "all" in count methods vs query methods
+
+441. EDGE_4: Array boundary cases:
+- Empty notes array []
+- notes array with exactly MAX_NOTES_PER_ITEM (50) items
+- notes array with 0 items
+
+442. EDGE_5: Null vs undefined vs missing:
+- timestamp: undefined → auto-generate
+- timestamp: null → reject or auto-generate?
+- optional fields undefined vs null vs missing
+
+443. EDGE_6: Boolean coercion:
+- isSystemGenerated: "true" (string) → coerced to true?
+- isPreApproved: 1 → coerced to true?
+- isDeleted: null → coerced to false?
+
+444. EDGE_7: Concurrent operations:
+- Two moderators approve same item simultaneously
+- User creates entry while another deletes it
+- **Expected**: Optimistic locking ensures consistency
+
+445. EDGE_8: UTF-8 and special characters:
+- Emoji in note text: "Great work! 👍"
+- Multi-byte characters in userId
+- **Expected**: Stored and retrieved correctly
+
+446. EDGE_9: Extremely long strings:
+- Note with MAX_NOTE_LENGTH (5000) chars
+- Note with 5001 chars → rejected
+- UserId with 1000 chars
+
+447. EDGE_10: Result set edge cases:
+- Query returns 0 items
+- Query returns exactly limit items
+- Query returns limit+1 items with pagination
+
+---
+
+### Additional Method-Specific Edge Cases
+
+**getModerationItems Edge Cases**:
+- All filters null/undefined → default behavior
+- Conflicting filters (e.g., userId from one user, status=approved but user has no approved items)
+- Filter combination requiring multiple GSIs → picks optimal index
+
+**countModerationItemsByStatus Edge Cases**:
+- Count with status="all" and filters → applies filters correctly
+- Very large count requiring many pagination loops
+- Count during concurrent writes → eventual consistency considered
+
+**_countPendingResubmission Edge Cases**:
+- No pending resubmission items → returns 0
+- Error during count → returns 0 (documented behavior in method)
+
+**Soft Delete Edge Cases**:
+- Query with includeDeleted=false excludes soft-deleted
+- Query with includeDeleted=true includes soft-deleted
+- Hard delete after soft delete → removes permanently
+
+**Meta Field Edge Cases**:
+- History array at exactly MAX_HISTORY_ENTRIES (100)
+- History overflow → oldest entries trimmed
+- Version conflict during concurrent meta updates
+
+---
+
+### Regression Tests
+
+448. REGR_1: Ensure moderationId uniqueness across the system (no UUID collisions in GSI_BY_MOD_ID).
+
+449. REGR_2: Verify dayKey always uses UTC for consistency across timezones.
+
+450. REGR_3: Ensure statusSubmittedAt composite key format never changes (backward compatibility).
+
+451. REGR_4: Verify pagination token format remains stable across versions.
+
+452. REGR_5: Ensure MAX_* constants are respected and haven't been accidentally changed.
+
+453. REGR_6: Test that all GSI projections include necessary fields (prevent missing field errors).
+
+454. REGR_7: Verify optimistic locking version increments consistently.
+
+455. REGR_8: Ensure content compression/decompression is backward compatible with old data.
+
+---
+
+## Summary Statistics
+
+**Total Test Scenarios**: 300+
+
+**Breakdown by Method**:
+1. createModerationSchema: 7 scenarios
+2. generateModerationId: 8 scenarios
+3. dayKeyFromTs: 15 scenarios
+4. statusSubmittedAtKey: 13 scenarios
+5. createModerationEntry: 38 scenarios
+6. updateModerationEntry: 35 scenarios
+7. addNote: 22 scenarios
+8. applyModerationAction: 29 scenarios
+9. escalateModerationItem: 17 scenarios
+10. getModerationItems: 31 scenarios
+11. getModerationItemsByStatus: 16 scenarios
+12. getAllByDate: 16 scenarios
+13. getUserModerationItemsByStatus: 18 scenarios
+14. getModerationItemsByPriority: 14 scenarios
+15. getModerationItemsByType: 15 scenarios
+16. getModerationRecordById: 15 scenarios
+17. updateModerationMeta: 17 scenarios
+18. softDeleteModerationItem: 13 scenarios
+19. hardDeleteModerationItem: 10 scenarios
+20. countModerationItemsByStatus: 15 scenarios
+21. getAllModerationCounts: 13 scenarios
+
+**Cross-Cutting Tests**: 50+ scenarios covering:
+- Security/injection: 5 categories
+- Dependency interactions: 6 categories
+- Performance-sensitive: 5 categories
+- Logging correctness: 3 categories
+- Edge cases: 10 categories
+- Regression tests: 8 categories
+
+**Coverage Goals**:
+- ✅ All public methods
+- ✅ All error paths
+- ✅ All enum validations
+- ✅ All security boundaries
+- ✅ All pagination paths
+- ✅ All compression/decompression
+- ✅ All optimistic locking
+- ✅ All retry mechanisms
+- ✅ All GSI query paths
+- ✅ All logging points
+- ✅ Private helper methods (via public interface)
+
+**Test Quality Metrics**:
+- Each PASS scenario validates expected behavior and side effects
+- Each FAIL scenario validates error handling, logging, and meaningful error messages
+- Security tests cover OWASP top 10 relevant categories
+- Performance tests prevent resource exhaustion
+- Concurrency tests ensure data consistency
+- Edge cases cover boundary conditions and unusual inputs
+
+---
+
+## Additional Test Scenarios from Code Audit
+
+Based on comprehensive code review, the following additional test scenarios should be added:
+
+### Additional Private Helper Method Tests
+
+#### _buildPartitionKey(userId)
+
+456. PASS_buildPartitionKey_1: Valid userId returns "moderation#<userId>" format.
+
+457. PASS_buildPartitionKey_2: Whitespace in userId gets sanitized correctly.
+
+458. FAIL_buildPartitionKey_1: Empty userId after sanitization → throws "Invalid userId for partition key".
+
+459. FAIL_buildPartitionKey_2: Whitespace-only userId "   " → sanitized to empty → throws.
+
+#### _validateAndJoinFilterExpressions(filterExpressions)
+
+460. PASS_validateAndJoinFilterExpressions_1: Single expression returns as-is.
+
+461. PASS_validateAndJoinFilterExpressions_2: Multiple expressions joined with " AND ".
+
+462. PASS_validateAndJoinFilterExpressions_3: Empty array returns empty string.
+
+463. FAIL_validateAndJoinFilterExpressions_1: Non-array input → throws or handles gracefully.
+
+#### _validateContentIdFormat(contentId)
+
+464. PASS_validateContentIdFormat_1: Valid contentId format accepted.
+
+465. PASS_validateContentIdFormat_2: ContentId with special characters sanitized.
+
+466. FAIL_validateContentIdFormat_1: Empty contentId → throws.
+
+467. FAIL_validateContentIdFormat_2: Invalid format → throws validation error.
+
+#### _validateActionStatusConsistency(action, status)
+
+468. PASS_validateActionStatusConsistency_1: Valid action/status pairs (approve→approved, reject→rejected) pass validation.
+
+469. PASS_validateActionStatusConsistency_2: Null/undefined action or status skipped (no validation).
+
+470. FAIL_validateActionStatusConsistency_1: Inconsistent pair (approve→rejected) → logs warning via ErrorHandler.
+
+#### _validateDeletedConsistency(isDeleted, deletedAt)
+
+471. PASS_validateDeletedConsistency_1: isDeleted=true with deletedAt set → passes.
+
+472. PASS_validateDeletedConsistency_2: isDeleted=false with deletedAt=null → passes.
+
+473. FAIL_validateDeletedConsistency_1: isDeleted=true but deletedAt=null → throws "isDeleted is true but deletedAt must be set".
+
+474. FAIL_validateDeletedConsistency_2: isDeleted=false but deletedAt set → throws "isDeleted is false but deletedAt must be null".
+
+#### _validateActionedAtConsistency(actionedAt, action)
+
+475. PASS_validateActionedAtConsistency_1: action set with actionedAt set → passes.
+
+476. PASS_validateActionedAtConsistency_2: action null with actionedAt null → passes.
+
+477. FAIL_validateActionedAtConsistency_1: action set but actionedAt null → throws.
+
+478. FAIL_validateActionedAtConsistency_2: action null but actionedAt set → throws.
+
+#### _validateEscalatedConsistency(status, escalatedBy)
+
+479. PASS_validateEscalatedConsistency_1: status="escalated" with escalatedBy set → passes.
+
+480. PASS_validateEscalatedConsistency_2: status!="escalated" with escalatedBy=null → passes.
+
+481. FAIL_validateEscalatedConsistency_1: status="escalated" but escalatedBy=null → throws.
+
+482. FAIL_validateEscalatedConsistency_2: status!="escalated" but escalatedBy set → throws.
+
+#### _validateStatusSubmittedAtConsistency(status, statusSubmittedAt, submittedAt)
+
+483. PASS_validateStatusSubmittedAtConsistency_1: statusSubmittedAt matches expected format from status and submittedAt.
+
+484. FAIL_validateStatusSubmittedAtConsistency_1: statusSubmittedAt doesn't match expected format → throws.
+
+#### _validateFieldLength(fieldName, value, maxLength)
+
+485. PASS_validateFieldLength_1: Value within maxLength → passes.
+
+486. PASS_validateFieldLength_2: Value exactly at maxLength → passes.
+
+487. FAIL_validateFieldLength_1: Value exceeds maxLength → throws "Field length exceeded".
+
+488. FAIL_validateFieldLength_2: Null/undefined value → may throw or pass depending on implementation.
+
+#### _getCurrentTimestamp()
+
+489. PASS_getCurrentTimestamp_1: Returns positive integer timestamp.
+
+490. PASS_getCurrentTimestamp_2: Returns value close to Date.now() (within 1 second tolerance).
+
+491. PASS_getCurrentTimestamp_3: Returns monotonically increasing values on sequential calls.
+
+492. FAIL_getCurrentTimestamp_1: Date.now() throws error → ErrorHandler logs, uses fallback or throws.
+
+### Additional Method-Specific Test Scenarios
+
+#### createModerationEntry Additional Tests
+
+493. PASS_createModerationEntry_19: Custom moderationId provided and validated via _validateModerationIdFormat.
+
+494. PASS_createModerationEntry_20: Duplicate moderationId check via GSI_BY_MOD_ID query before creation.
+
+495. PASS_createModerationEntry_21: Content compression threshold (tests when compression is triggered vs skipped).
+
+496. PASS_createModerationEntry_22: All GSI fields populated correctly (statusSubmittedAt, dayKey, etc.).
+
+497. PASS_createModerationEntry_23: Version field initialized to 1 in meta.
+
+498. FAIL_createModerationEntry_21: GSI_BY_MOD_ID query fails during duplicate check → retries → throws.
+
+499. FAIL_createModerationEntry_22: Content compression throws error → propagates to caller.
+
+#### updateModerationEntry Additional Tests
+
+500. PASS_updateModerationEntry_17: Version increment on successful update.
+
+501. PASS_updateModerationEntry_18: Partial update doesn't affect other fields (atomic update).
+
+502. PASS_updateModerationEntry_19: Content decompression before update comparison.
+
+503. PASS_updateModerationEntry_20: Content recompression if updated content is large.
+
+504. FAIL_updateModerationEntry_20: getModerationRecordById fails during lookup → throws.
+
+505. FAIL_updateModerationEntry_21: Content decompression fails → throws.
+
+#### applyModerationAction Additional Tests
+
+506. PASS_applyModerationAction_15: TAG type items get tagStatus set correctly (published/pending).
+
+507. PASS_applyModerationAction_16: Non-TAG type items have tagStatus cleared/nullified.
+
+508. PASS_applyModerationAction_17: Multiple notes (private + public) added in single action.
+
+509. PASS_applyModerationAction_18: Notes array length validation before adding notes.
+
+510. PASS_applyModerationAction_19: Optimistic locking retry with exponential backoff (50ms * retryCount).
+
+511. FAIL_applyModerationAction_16: Notes array would exceed MAX_NOTES_PER_ITEM → throws before update.
+
+512. FAIL_applyModerationAction_17: getModerationRecordById fails during lookup → throws.
+
+#### escalateModerationItem Additional Tests
+
+513. PASS_escalateModerationItem_10: Already escalated item can be re-escalated (idempotent behavior).
+
+514. PASS_escalateModerationItem_11: Optimistic locking retry mechanism with backoff.
+
+515. FAIL_escalateModerationItem_10: Item already escalated → may throw or succeed (test actual behavior).
+
+#### getModerationItems Additional Tests
+
+516. PASS_getModerationItems_19: Complex filter combination (userId + status + dayKey + date range) → correct index selection.
+
+517. PASS_getModerationItems_20: Filter by moderatedBy uses GSI_MODERATED_BY.
+
+518. PASS_getModerationItems_21: Filter by contentId uses GSI_CONTENT_ID.
+
+519. PASS_getModerationItems_22: Filter by escalatedBy uses GSI_ESCALATED.
+
+520. PASS_getModerationItems_23: No suitable index for filter combination → falls back to Scan.
+
+521. PASS_getModerationItems_24: ScanIndexForward only set for Query operations, not Scan.
+
+522. FAIL_getModerationItems_14: Invalid filter combination (conflicting filters) → throws or uses fallback.
+
+#### getUserModerationItemsByStatus Additional Tests
+
+523. PASS_getUserModerationItemsByStatus_11: Status "all" path uses different query structure (userId only in KeyCondition).
+
+524. PASS_getUserModerationItemsByStatus_12: Date range filters applied via FilterExpression when status="all".
+
+525. FAIL_getUserModerationItemsByStatus_9: Invalid date range (start > end) → throws or handles gracefully.
+
+#### getModerationRecordById Additional Tests
+
+526. PASS_getModerationRecordById_8: GSI query returns item, then getItem retrieves full record (two-step process).
+
+527. PASS_getModerationRecordById_9: getItem fails after successful GSI query → throws.
+
+528. PASS_getModerationRecordById_10: Content decompression applied to retrieved item.
+
+529. FAIL_getModerationRecordById_9: GSI query returns empty result → returns null (not throws).
+
+#### updateModerationMeta Additional Tests
+
+530. PASS_updateModerationMeta_9: contentDeleted flag update with automatic contentDeletedAt timestamp.
+
+531. PASS_updateModerationMeta_10: contentDeleted=false clears contentDeletedAt.
+
+532. PASS_updateModerationMeta_11: History truncation when exceeding MAX_HISTORY_ENTRIES (oldest entries removed).
+
+533. PASS_updateModerationMeta_12: Version increment on meta update.
+
+534. FAIL_updateModerationMeta_10: getModerationRecordById fails → throws.
+
+#### softDeleteModerationItem Additional Tests
+
+535. PASS_softDeleteModerationItem_7: Already deleted item → throws "already deleted" error.
+
+536. PASS_softDeleteModerationItem_8: deletedBy parameter used for audit trail.
+
+537. PASS_softDeleteModerationItem_9: Meta field updated with softDelete action in history.
+
+538. FAIL_softDeleteModerationItem_8: getModerationRecordById fails → throws.
+
+539. FAIL_softDeleteModerationItem_9: Item already deleted → throws "already deleted" error.
+
+#### countModerationItemsByStatus Additional Tests
+
+540. PASS_countModerationItemsByStatus_10: Strategy selection (userId+status vs moderatedBy vs status-only) based on filters.
+
+541. PASS_countModerationItemsByStatus_11: unmoderatedOnly flag uses attribute_not_exists filter.
+
+542. PASS_countModerationItemsByStatus_12: hasRejectionHistory filter uses attribute_exists.
+
+543. PASS_countModerationItemsByStatus_13: Multiple pagination pages summed correctly.
+
+544. PASS_countModerationItemsByStatus_14: Values marshaled once before pagination loop (efficiency).
+
+545. FAIL_countModerationItemsByStatus_7: Invalid filter combination → throws or uses fallback strategy.
+
+#### getAllModerationCounts Additional Tests
+
+546. PASS_getAllModerationCounts_9: _countPendingResubmission error returns 0 (doesn't crash overall method).
+
+547. PASS_getAllModerationCounts_10: Result mapping from Promise.all results to status keys correct.
+
+548. PASS_getAllModerationCounts_11: Special counts (pendingResubmission, all, unmoderated) included in result.
+
+549. FAIL_getAllModerationCounts_6: _countPendingResubmission throws (not caught) → fails entire operation.
+
+### Additional Cross-Cutting Test Scenarios
+
+#### Consistency Validation Tests
+
+550. CONSISTENCY_1: Action/Status consistency validation across all methods that set both fields.
+
+551. CONSISTENCY_2: Deleted consistency (isDeleted/deletedAt) validation in all query methods.
+
+552. CONSISTENCY_3: ActionedAt consistency (actionedAt/action) validation.
+
+553. CONSISTENCY_4: Escalated consistency (status/escalatedBy) validation.
+
+554. CONSISTENCY_5: StatusSubmittedAt consistency validation (matches status + submittedAt).
+
+#### GSI Query Path Tests
+
+555. GSI_1: All 10 GSIs tested with correct KeyConditionExpression patterns.
+
+556. GSI_2: GSI projection fields (INCLUDE vs KEYS_ONLY) verified for each index.
+
+557. GSI_3: FilterExpression applied correctly when using GSIs.
+
+558. GSI_4: Index selection logic for getModerationItems (optimal index chosen).
+
+559. GSI_5: GSI eventual consistency handled (getItem after GSI query for consistent reads).
+
+#### Pagination Token Tests
+
+560. PAGINATION_1: Token encoding includes timestamp for expiration checking.
+
+561. PAGINATION_2: Token decoding validates TTL (15 minutes).
+
+562. PAGINATION_3: Legacy token format (without timestamp) handled backward compatibly.
+
+563. PAGINATION_4: Token size validation (MAX_PAGINATION_TOKEN_SIZE = 100KB).
+
+564. PAGINATION_5: Circular reference in lastKey → encoding fails gracefully, returns null.
+
+565. PAGINATION_6: Non-serializable values in lastKey → encoding fails gracefully.
+
+#### Compression/Decompression Tests
+
+566. COMPRESSION_1: Compression threshold (when content size triggers compression).
+
+567. COMPRESSION_2: Small content (< threshold) not compressed.
+
+568. COMPRESSION_3: Large content (> threshold) compressed and contentCompressed flag set.
+
+569. COMPRESSION_4: Round-trip integrity (compress → store → retrieve → decompress → original).
+
+570. COMPRESSION_5: Binary content (Buffer) compression/decompression.
+
+571. COMPRESSION_6: Decompression of non-compressed content (backward compatibility).
+
+572. COMPRESSION_7: Corrupted compressed data → decompression throws.
+
+#### Optimistic Locking Tests
+
+573. LOCKING_1: Version check in ConditionExpression for all update operations.
+
+574. LOCKING_2: Retry mechanism with exponential backoff (50ms * retryCount).
+
+575. LOCKING_3: Max retries (5) before throwing concurrent modification error.
+
+576. LOCKING_4: Version increment on successful update.
+
+577. LOCKING_5: Concurrent updates (race condition) → only one succeeds.
+
+#### Error Code Consistency Tests
+
+578. ERROR_CODE_1: All ErrorHandler.addError calls include unique error codes.
+
+579. ERROR_CODE_2: Error codes follow consistent naming pattern (METHOD_NAME_FAILED, INVALID_FIELD, etc.).
+
+580. ERROR_CODE_3: Error context data includes relevant parameters for debugging.
+
+581. ERROR_CODE_4: No duplicate error codes across different methods.
+
+#### Logging Consistency Tests
+
+582. LOGGING_1: All write operations log via Logger.writeLog with correct flag="MODERATIONS".
+
+583. LOGGING_2: All methods start with Logger.debugLog [START].
+
+584. LOGGING_3: All methods end with Logger.debugLog [SUCCESS] or [ERROR].
+
+585. LOGGING_4: Log actions match method names (moderationCreated, moderationUpdated, etc.).
+
+586. LOGGING_5: Log data includes relevant context (moderationId, userId, etc.).
+
+#### Retry Mechanism Tests
+
+587. RETRY_1: _retryOperation retries on retryable errors (throttling, timeouts).
+
+588. RETRY_2: _retryOperation doesn't retry on non-retryable errors (validation errors).
+
+589. RETRY_3: Retry backoff increases exponentially (RETRY_BACKOFF_MS * attempt).
+
+590. RETRY_4: Max retries (RETRY_MAX_ATTEMPTS = 3) enforced.
+
+591. RETRY_5: Operation succeeds on retry → returns result.
+
+#### Tag Status Tests (TYPE.TAGS specific)
+
+592. TAG_STATUS_1: TAGS type items get tagStatus="published" when approved/approved_global.
+
+593. TAG_STATUS_2: TAGS type items get tagStatus="pending" when rejected or pending.
+
+594. TAG_STATUS_3: Non-TAGS type items have tagStatus cleared/nullified.
+
+595. TAG_STATUS_4: tagStatus validation in applyModerationAction.
+
+#### Meta Field History Tests
+
+596. META_HISTORY_1: History array initialized with first action on create.
+
+597. META_HISTORY_2: History entries appended on each update.
+
+598. META_HISTORY_3: History truncated to last MAX_HISTORY_ENTRIES (100) entries.
+
+599. META_HISTORY_4: Version increments on each meta update.
+
+600. META_HISTORY_5: History entry structure (action, timestamp, userId, details).
+
+601. META_HISTORY_6: Meta field created if missing on update operations.
+
+#### Date/Time Validation Tests
+
+602. DATETIME_1: Timestamp validation (5 years past, 5 minutes future boundaries).
+
+603. DATETIME_2: dayKey validation (YYYYMMDD format, valid calendar date).
+
+604. DATETIME_3: statusSubmittedAt key format consistency.
+
+605. DATETIME_4: UTC timezone usage for dayKey (consistent across timezones).
+
+606. DATETIME_5: Date range validation (start <= end).
+
+#### Enum Validation Tests
+
+607. ENUM_1: All STATUS enum values validated in all methods.
+
+608. ENUM_2: All TYPE enum values validated (including aliases like gallery/image_gallery).
+
+609. ENUM_3: All PRIORITY enum values validated.
+
+610. ENUM_4: All ACTION enum values validated.
+
+611. ENUM_5: All MODERATION_TYPE enum values validated.
+
+612. ENUM_6: Invalid enum values rejected with descriptive errors.
+
+#### Query Optimization Tests
+
+613. QUERY_OPT_1: Index selection for optimal query performance.
+
+614. QUERY_OPT_2: FilterExpression vs KeyConditionExpression usage.
+
+615. QUERY_OPT_3: ScanIndexForward only set for Query operations.
+
+616. QUERY_OPT_4: Limit enforcement before query execution.
+
+617. QUERY_OPT_5: Pagination token size validation before encoding.
+
+#### Content Handling Tests
+
+618. CONTENT_1: Empty content stored as null.
+
+619. CONTENT_2: Large content compressed automatically.
+
+620. CONTENT_3: Content decompression on retrieval.
+
+621. CONTENT_4: Content integrity after compression/decompression round-trip.
+
+622. CONTENT_5: Binary content (Buffer) handling.
+
+623. CONTENT_6: Content size limits (if any) enforced.
+
+#### Security Additional Tests
+
+624. SECURITY_6: userId sanitization prevents injection in partition keys.
+
+625. SECURITY_7: contentId format validation prevents path traversal.
+
+626. SECURITY_8: Note text sanitization prevents XSS.
+
+627. SECURITY_9: Reason text sanitization prevents injection.
+
+628. SECURITY_10: Pagination token validation prevents token manipulation.
+
+629. SECURITY_11: Enum validation prevents invalid status/type/priority injection.
+
+630. SECURITY_12: Timestamp validation prevents timestamp manipulation.
+
+#### Performance Additional Tests
+
+631. PERF_6: Large result set pagination (1000+ items across multiple pages).
+
+632. PERF_7: Parallel count operations performance (getAllModerationCounts).
+
+633. PERF_8: Content compression performance (large content objects).
+
+634. PERF_9: Query result size limits prevent memory exhaustion.
+
+635. PERF_10: Pagination iteration limits prevent infinite loops.
+
+#### Edge Cases Additional Tests
+
+636. EDGE_11: Zero-length arrays (notes: [], history: []).
+
+637. EDGE_12: Maximum length arrays (notes: 50 items, history: 100 items).
+
+638. EDGE_13: Boundary values (MAX_NOTE_LENGTH, MAX_NOTES_PER_ITEM, MAX_HISTORY_ENTRIES).
+
+639. EDGE_14: Special characters in all string fields (userId, contentId, note text, etc.).
+
+640. EDGE_15: Very long string fields (at limits and beyond).
+
+641. EDGE_16: Concurrent operations on same item (optimistic locking).
+
+642. EDGE_17: Rapid sequential updates (version conflicts and retries).
+
+643. EDGE_18: Empty result sets from queries.
+
+644. EDGE_19: Single-item result sets.
+
+645. EDGE_20: Exactly limit-sized result sets.
+
+#### Integration Tests
+
+646. INTEGRATION_1: Full workflow: create → update → addNote → applyAction → escalate → softDelete.
+
+647. INTEGRATION_2: Full workflow: create → query → update → query again (data consistency).
+
+648. INTEGRATION_3: Multiple users creating entries simultaneously.
+
+649. INTEGRATION_4: Multiple moderators acting on same item (concurrency).
+
+650. INTEGRATION_5: Large batch operations (creating 100+ entries).
+
+#### Regression Tests Additional
+
+651. REGR_9: Constants haven't changed (MAX_* values, TTL values, retry counts).
+
+652. REGR_10: GSI index names haven't changed.
+
+653. REGR_11: PK/SK format hasn't changed.
+
+654. REGR_12: statusSubmittedAt key format hasn't changed.
+
+655. REGR_13: Meta field structure hasn't changed.
+
+656. REGR_14: Note structure hasn't changed.
+
+657. REGR_15: Error codes haven't changed (backward compatibility).
+
+658. REGR_16: Log action names haven't changed.
+
+---
+
+## Updated Summary Statistics
+
+**Total Test Scenarios**: 400+
+
+**Breakdown by Category**:
+- Public Methods: 21 methods × ~15-40 scenarios each = ~350 scenarios
+- Private Helper Methods: 15+ methods × ~5-10 scenarios each = ~100 scenarios
+- Cross-Cutting Tests: 60+ scenarios
+- Integration Tests: 5+ scenarios
+- Regression Tests: 16+ scenarios
+
+**New Test Scenarios Added from Audit**: 100+
+- Additional private helper method tests: 30+
+- Additional method-specific scenarios: 40+
+- Additional cross-cutting tests: 30+
+
+**Coverage Goals**:
+- ✅ All public methods (21 methods)
+- ✅ All private helper methods (15+ methods)
+- ✅ All error paths
+- ✅ All enum validations
+- ✅ All security boundaries
+- ✅ All pagination paths
+- ✅ All compression/decompression
+- ✅ All optimistic locking
+- ✅ All retry mechanisms
+- ✅ All GSI query paths
+- ✅ All logging points
+- ✅ All consistency validations
+- ✅ All edge cases
+- ✅ Integration workflows
+- ✅ Regression prevention

@@ -1,0 +1,19 @@
+services:
+  scylla:
+    image: scylladb/scylla:latest
+    container_name: scylla
+    command:
+      - --smp=1
+      - --memory=250M
+      - --alternator-port=8000
+      - --alternator-write-isolation=always
+      - --alternator-address=0.0.0.0
+      - --rf-rack-valid-keyspaces=true
+    ports:
+      - "9042:9042"
+      - "9180:9180"
+      - "8000:8000"
+    volumes:
+      - scylla_data:/var/lib/scylla
+volumes:
+  scylla_data:

@@ -1,0 +1,40 @@
+{
+  "scripts": {
+    "dev": "nodemon server.js",
+    "start": "node server.js",
+    "blockUserService:create": "node modules/blockUserService/scripts/createTables.js",
+    "blockUserService:seed": "node modules/blockUserService/scripts/seed.js",
+    "blockUserService:drop": "node modules/blockUserService/scripts/deleteTables.js",
+    "media:create": "node modules/media/scripts/createTables.js",
+    "media:drop": "node modules/media/scripts/deleteTables.js",
+    "media:seed": "node modules/media/scripts/seedTables.js",
+    "media:delete": "node modules/media/scripts/deleteTables.js",
+    "moderation:seed": "node modules/moderation/scripts/seed.js",
+    "users:create": "node modules/users/src/db/createTable.js",
+    "users:drop": "node modules/users/src/db/deleteTable.js",
+    "users:seed": "node modules/users/src/db/seedUser.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.958.0",
+    "@babel/core": "^7.23.0",
+    "@babel/preset-env": "^7.23.0",
+    "babel-jest": "^29.7.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "jest": "^29.7.0",
+    "joi": "^18.0.2",
+    "lru-cache": "^11.2.4",
+    "luxon": "^3.7.2",
+    "morgan": "^1.10.1",
+    "mysql2": "^3.16.1",
+    "nodemon": "^3.1.11",
+    "p-limit": "^7.2.0",
+    "pg": "^8.17.2",
+    "util": "^0.12.5",
+    "zlib": "^1.0.5"
+  },
+  "devDependencies": {
+    "supertest": "^7.2.2"
+  }
+}
