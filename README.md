@@ -26,12 +26,54 @@ See **[HOW_TO_RUN.md](./HOW_TO_RUN.md)** for detailed instructions.
 
 ## 📁 Project Structure
 
-- `handler/` - Main schema handler with version management
-- `postgres/` - PostgreSQL adapter with schema support
-- `mysql/` - MySQL adapter
-- `scylla/` - ScyllaDB adapter
-- `docker-compose.yml` - PostgreSQL container setup
-- `initdb/` - Database initialization scripts
+- Top-level files:
+   - `dev.dockerfile` — development Dockerfile
+   - `index.js` — optional app entrypoint / example script
+   - `server.js` — server bootstrap (varies by module)
+   - `package.json` — repo-level npm config
+   - `dev.docker-compose.yml` — top-level compose for local development
+   - `README.md` — this file
+
+- `configs/` — repo-wide configuration templates and route logs (e.g. `envConfig.json`, `logRoutes.json`)
+
+- `databases/` — DB helpers, compose and integration scripts, tests and setup helpers for all database flavors
+
+- `handler/` — Database Schema Handler service
+   - `package.json`, `db/`, `config/`, `utils/`, `schema.v2.*.json`, test scripts and seed data
+
+- `initdb/` — SQL scripts to initialise roles, users and security objects
+
+- Adapters (lightweight runtime wrappers):
+   - `mysql/` — MySQL adapter and test harness
+   - `postgres/` — PostgreSQL adapter and test harness
+   - `scylla/` — ScyllaDB adapter and local compose
+
+- `modules/` — feature micro-services. Each module typically contains `server.js`, `package.json`, `src/`, `scripts/`, `test/`, `docs/`.
+   - Examples: `blockUserService/`, `media/`, `moderation/`, `users/`
+
+- `utils/` — small, repo-wide helpers (e.g. `ConfigFileLoader.js`, `Logger.js`, `EnvLoader.js`, `DateTime.js`, `SafeUtils.js`)
+
+- `docs/` — high-level documentation and endpoint guides
+
+### Module Architecture
+
+- Modules are implemented as self-contained classes (one class per service) and live under `modules/<service>/`.
+- Modules can be built, tested and deployed independently — they are intended to run as separate services when required.
+- Required exports: every module should export an `init()` method and a `router()` method:
+   - `init()` — perform startup initialization (load config, connect to DBs, register metrics, etc.).
+   - `router()` — return the module's HTTP/router instance (Express/fastify router or similar) so the host can mount routes.
+- Export example (CommonJS):
+
+   ```js
+   function init(options) { /* setup */ }
+   function router() { /* return express.Router() */ }
+
+   module.exports = { init, router };
+   ```
+
+Notes:
+- Each module under `modules/` is intended to be self-contained. See the module's `README.md` for start/test commands.
+- Handler-specific docs live in `handler/README.md` and `handler/schema.v2.*.json` files are the canonical schema examples.
 
 ## 🔧 Features
 
