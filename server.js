@@ -8,6 +8,8 @@ const { router: blockUserRouter, initBlockUserService } = require('./modules/blo
 const { router: usersRouter, initUsersService } = require('./modules/users/server.js');
 const { router: mediaRouter, initMediaService } = require('./modules/media/server.js');
 const { router: moderationRouter, initModerationService } = require('./modules/moderation/server.js');
+const { router: paymentRouter, initPaymentService } = require('./modules/payment/server.js');
+const { router: tokenRegistryRouter, initTokenRegistryService } = require('./modules/tokenRegistry/server.js');
 
 dotenv.config();
 
@@ -57,6 +59,18 @@ const modules = {
     init: initModerationService,
     routePrefix: '',
     port: process.env.MODERATION_PORT || 3004
+  },
+  payment: {
+    router: paymentRouter,
+    init: initPaymentService,
+    routePrefix: '',
+    port: process.env.PAYMENT_PORT || 3005
+  },
+  tokenRegistry: {
+    router: tokenRegistryRouter,
+    init: initTokenRegistryService,
+    routePrefix: '',
+    port: process.env.TOKEN_REGISTRY_PORT || 3006
   }
 };
 

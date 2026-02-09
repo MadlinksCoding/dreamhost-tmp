@@ -1,0 +1,79 @@
+services:
+  scylla:
+    image: scylladb/scylla:latest
+    container_name: token-registry-scylla
+    command:
+      - --smp=1
+      - --memory=512M
+      - --alternator-port=8000
+      - --alternator-write-isolation=forbid_rmw
+      - --alternator-address=0.0.0.0
+      - --rf-rack-valid-keyspaces=true
+    ports:
+      - "9043:9042" # CQL port (different port to avoid conflicts)
+      - "8001:8000" # Alternator (DynamoDB API, different port to avoid conflicts)
+    volumes:
+      - token_registry_scylla_data:/var/lib/scylla
+    healthcheck:
+      test: ["CMD-SHELL", "nodetool status | grep -E '^UN' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  init-db:
+    image: node:18-alpine
+    container_name: token-registry-init
+    depends_on:
+      scylla:
+        condition: service_healthy
+    working_dir: /app
+    volumes:
+      - .:/app
+      - ../..:/workspace
+    networks:
+      - token-registry-network
+    environment:
+      - NODE_ENV=test
+      - DYNAMODB_ENDPOINT=http://scylla:8000
+    command: >
+      sh -c "
+        cd /workspace &&
+        npm install --silent &&
+        node modules/tokenRegistry/scripts/init-tables.js &&
+        node modules/tokenRegistry/scripts/seed-admin-data.js &&
+        echo 'Token registry seed completed.'
+      "
+    restart: "no"
+
+  app:
+    image: node:18-alpine
+    container_name: token-registry-app
+    depends_on:
+      init-db:
+        condition: service_completed_successfully
+    working_dir: /app
+    volumes:
+      - .:/app
+      - ../..:/workspace
+    ports:
+      - "3006:3000"
+    networks:
+      - token-registry-network
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DYNAMODB_ENDPOINT=http://scylla:8000
+    command: >
+      sh -c "
+        cd /workspace &&
+        node modules/tokenRegistry/server.js
+      "
+    restart: unless-stopped
+
+volumes:
+  token_registry_scylla_data:
+
+networks:
+  token-registry-network:
+    driver: bridge
