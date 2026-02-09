@@ -138,17 +138,6 @@ class DateTime {
   });
 
   /**
-   * Return an ISO timestamp `seconds` in the future from now.
-   * @param {number} seconds
-   * @returns {string}
-   */
-  static future(seconds = 0) {
-    const secs = Number(seconds) || 0;
-    const nowSeconds = Math.floor(LuxonDateTime.now().toSeconds());
-    return LuxonDateTime.fromSeconds(nowSeconds + secs).toISO();
-  }
-
-  /**
    * Detect format identifier.
    *
    * Evaluate the string to determine which known format it matches.

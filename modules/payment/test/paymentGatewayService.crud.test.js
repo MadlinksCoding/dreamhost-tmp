@@ -10,8 +10,9 @@ const { createAllTablesFromJson } = CreateTableModule;
 
 // Helper: Check ScyllaDB is running
 async function checkScyllaDB() {
+  const endpoint = process.env.DYNAMODB_ENDPOINT || 'http://localhost:8000';
   return new Promise((resolve, reject) => {
-    const req = http.get('http://localhost:8000', (res) => {
+    const req = http.get(endpoint, (res) => {
       res.on('data', () => {});
       res.on('end', () => {
         res.destroy();
@@ -125,104 +126,14 @@ const testDataFactory = {
   })
 };
 
-// In‑memory ScyllaDb stub to avoid hitting real DynamoDB/AWS during tests.
-function installInMemoryScyllaDb() {
-  const tables = new Map(); // tableName -> Map(pk|sk composite -> item)
-
-  const makeKey = (obj) => {
-    if (obj.pk !== undefined && obj.sk !== undefined) {
-      return `${obj.pk}||${obj.sk}`;
-    }
-    // Fallback: stable JSON string
-    return JSON.stringify(obj);
-  };
-
-  const clone = (obj) => JSON.parse(JSON.stringify(obj));
-
-  ScyllaDb.putItem = async (tableName, item) => {
-    const table = tables.get(tableName) ?? new Map();
-    tables.set(tableName, table);
-    const key = makeKey(item);
-    table.set(key, clone(item));
-    return clone(item);
-  };
-
-  ScyllaDb.getItem = async (tableName, key) => {
-    const table = tables.get(tableName);
-    if (!table) return null;
-    const stored = table.get(makeKey(key));
-    return stored ? clone(stored) : null;
-  };
-
-  ScyllaDb.updateItem = async (tableName, key, updates) => {
-    const table = tables.get(tableName) ?? new Map();
-    tables.set(tableName, table);
-    const compositeKey = makeKey(key);
-    const existing = table.get(compositeKey) || clone(key);
-    const updated = { ...existing, ...clone(updates) };
-    table.set(compositeKey, updated);
-    return clone(updated);
-  };
-
-  ScyllaDb.deleteItem = async (tableName, key) => {
-    const table = tables.get(tableName);
-    if (!table) return { deleted: false };
-    table.delete(makeKey(key));
-    return { deleted: true };
-  };
-
-  // Very lightweight query/scan implementations used only for tests.
-  ScyllaDb.query = async (tableName, _keyConditionExpression, expressionAttributeValues = {}, options = {}) => {
-    const table = tables.get(tableName);
-    if (!table) return [];
-    let items = Array.from(table.values()).map(clone);
-
-    // Best‑effort filtering for patterns used in paymentGatewayService:
-    const vals = expressionAttributeValues || {};
-
-    // 1) Payee transaction history: pk = user#<userId>
-    if (vals[":pk"]) {
-      items = items.filter((i) => i.pk === vals[":pk"]);
-    }
-
-    // 2) Beneficiary transaction history: beneficiaryId / recipientId
-    if (vals[":beneficiaryId"]) {
-      const beneficiaryId = vals[":beneficiaryId"];
-      items = items.filter(
-        (i) => i.beneficiaryId === beneficiaryId || i.recipientId === beneficiaryId,
-      );
-    }
-
-    return items;
-  };
-
-  ScyllaDb.scan = async (tableName, _scanParams = {}) => {
-    const table = tables.get(tableName);
-    if (!table) return [];
-    return Array.from(table.values()).map(clone);
-  };
-
-  // Ensure endSession is a harmless no‑op in tests.
-  ScyllaDb.endSession = () => {
-    tables.clear();
-  };
-
-  // Stub tableExists/createTable so createAllTablesFromJson does not hit real DB.
-  ScyllaDb.tableExists = async () => false;
-  ScyllaDb.createTable = async () => {};
-}
+// Tests use real ScyllaDB only. No in-memory stub. No scan in test code.
 
 beforeAll(async () => {
   // Install in‑memory ScyllaDb stub so tests never hit real AWS/DynamoDB.
-  installInMemoryScyllaDb();
-  // Only verify Docker ScyllaDB when explicitly enabled.
-  // Default is using the in-memory `utils/ScyllaDb.js` mock in this repo snapshot.
-  if (process.env.USE_SCYLLA_DOCKER === '1') {
-    try {
-      await checkScyllaDB();
-    } catch (error) {
-      throw new Error('ScyllaDB Docker container is not running. Please run: docker compose up -d');
-    }
+  try {
+    await checkScyllaDB();
+  } catch (error) {
+    throw new Error('ScyllaDB is not running. Start with: cd modules/payment && docker compose up -d scylla');
   }
 
   // Load table configs and create tables (no‑op for in‑memory stub but keeps

@@ -26,16 +26,9 @@ async function deleteItem(tableName, key) { await getClient().send(new DeleteIte
 async function query(tableName, keyConditionExpression, expressionAttributeValues, options = {}) { const mergedValues = { ...(expressionAttributeValues||{}), ...(options.ExpressionAttributeValues||{}) }; const params = { TableName: tableName, KeyConditionExpression: keyConditionExpression, ExpressionAttributeValues: marshallItem(mergedValues) }; if (options.ExpressionAttributeNames && Object.keys(options.ExpressionAttributeNames).length) params.ExpressionAttributeNames = options.ExpressionAttributeNames; if (options.FilterExpression) params.FilterExpression = options.FilterExpression; if (options.IndexName) params.IndexName = options.IndexName; const result = await getClient().send(new QueryCommand(params)); return (result.Items||[]).map(i=>unmarshallItem(i)); }
 async function scan(tableName, scanParams = {}) { const params = { TableName: tableName }; if (scanParams.FilterExpression) params.FilterExpression = scanParams.FilterExpression; if (scanParams.ExpressionAttributeValues) params.ExpressionAttributeValues = marshallItem(scanParams.ExpressionAttributeValues); if (scanParams.ExpressionAttributeNames) params.ExpressionAttributeNames = scanParams.ExpressionAttributeNames; if (scanParams.Limit) params.Limit = scanParams.Limit; const res = await getClient().send(new ScanCommand(params)); return (res.Items||[]).map(i=>unmarshallItem(i)); }
 async function ping() { await getClient().send(new ListTablesCommand({ Limit: 1 })); }
-async function _reset() { 
-  const tokenRegistryTableName = 'TokenRegistry';
-  try {
-    const items = await scan(tokenRegistryTableName);
-    for (const item of items) {
-      await deleteItem(tokenRegistryTableName, { id: item.id });
-    }
-  } catch (e) {
-    // Silently ignore reset errors (table may not exist or other transient issues)
-  }
+// No-op: scan is banned. Tests should use query-based cleanup (cleanupTestingItems) with known userIds.
+async function _reset() {
+  // Intentionally empty - callers must use query-based cleanup
 }
 function endSession() { if (client) { client.destroy?.(); client = null; } }
 async function execute(query, params) {

@@ -293,14 +293,6 @@ class ErrorHandler {
   }
 
   /**
-   * Alias for clear() — test compatibility variant with underscore prefix
-   * @returns {void} Empties stored errors and resets counters
-   */
-  static _clear() {
-    this.clear();
-  }
-
-  /**
    * Clear only the cached errors.
    *
    * Reset the cache while leaving error counters intact for telemetry continuity.

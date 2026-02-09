@@ -6,8 +6,43 @@ const ScyllaDb = require("../src/utils/ScyllaDb.js");
 const ErrorHandler = require("../src/utils/ErrorHandler.js");
 const DateTime = require("../src/utils/DateTime.js");
 
+const tableName = TokenManager.TABLES.TOKEN_REGISTRY;
+
+async function cleanupByUserIds(userIds) {
+  for (const userId of userIds) {
+    try {
+      const items = await ScyllaDb.query(
+        tableName,
+        "userId = :uid",
+        { ":uid": userId },
+        { IndexName: TokenManager.INDEXES.USER_ID_CREATED_AT }
+      );
+      for (const item of items) {
+        await ScyllaDb.deleteItem(tableName, { id: item.id });
+      }
+      const asBeneficiary = await ScyllaDb.query(
+        tableName,
+        "beneficiaryId = :bid",
+        { ":bid": userId },
+        { IndexName: TokenManager.INDEXES.BENEFICIARY_ID_CREATED_AT }
+      );
+      for (const item of asBeneficiary) {
+        await ScyllaDb.deleteItem(tableName, { id: item.id });
+      }
+    } catch (e) {
+      // Ignore
+    }
+  }
+}
+
+const NODE_TEST_USER_IDS = [
+  "u1", "payer", "payee", "user-drilldown", "user-drilldown-query",
+  "user-list", "user-beneficiary", "user-a", "user-b", "user-adjust", "user-adjust-free",
+  "user-0", "user-1", "user-2", "user-3", "user-4", "other-user"
+];
+
 test.beforeEach(async () => {
-  await ScyllaDb._reset();
+  await cleanupByUserIds(NODE_TEST_USER_IDS);
   ErrorHandler._clear();
 });
 

@@ -8,6 +8,8 @@
  * - Real TokenManager class
  * 
  * No mocks, stubs, or in-memory DBs.
+ * 
+ * Cleanup uses query by userId (GSI) instead of scan; scan is banned in tests.
  */
 
 const TokenManager = require("../src/services/TokenManager.js");
@@ -17,46 +19,49 @@ const DateTime = require("../src/utils/DateTime.js");
 // Set test environment
 process.env.NODE_ENV = 'test';
 
+/** Query-based cleanup: delete items with testing=true for given userIds. No scan. */
+async function cleanupTestingItems(tableName, userIds) {
+  for (const userId of userIds) {
+    try {
+      const items = await ScyllaDb.query(
+        tableName,
+        'userId = :uid',
+        { ':uid': userId },
+        {
+          IndexName: TokenManager.INDEXES.USER_ID_CREATED_AT,
+          FilterExpression: '#testing = :true',
+          ExpressionAttributeNames: { '#testing': 'testing' },
+          ExpressionAttributeValues: { ':true': true }
+        }
+      );
+      for (const item of items) {
+        await ScyllaDb.deleteItem(tableName, { id: item.id });
+      }
+    } catch (error) {
+      console.warn('Cleanup warning:', error.message);
+    }
+  }
+}
+
+// Phase 1 user IDs (each test uses unique userId; add new IDs when adding tests)
+const PHASE_1_USER_IDS = [
+  'test-user-1.1.1', 'test-user-1.1.2', 'test-user-1.1.3',
+  'test-user-1.2.1', 'test-user-1.2.2',
+  'test-user-1.3.1', 'test-user-1.3.2',
+  'test-user-1.4.1', 'test-user-1.4.2',
+  'test-user-1.5.1', 'test-user-1.5.2'
+];
+
 describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
-  const keyspace = process.env.SCYLLA_KEYSPACE || 'app_keyspace';
   const tableName = TokenManager.TABLES.TOKEN_REGISTRY;
 
   beforeAll(async () => {
     // Ensure connection
-    await ScyllaDb.execute('SELECT now() FROM system.local', []);
-    
-    // Add testing column if it doesn't exist
-    try {
-      await ScyllaDb.execute(
-        `ALTER TABLE ${keyspace}.${tableName} ADD IF NOT EXISTS testing boolean`,
-        []
-      );
-    } catch (error) {
-      // Column might already exist, or table might not exist yet
-      // If table doesn't exist, we'll need to create it first
-      if (error.message.includes('does not exist')) {
-        throw new Error(`Table ${tableName} does not exist. Please create it first.`);
-      }
-      // If column already exists, that's fine
-      if (!error.message.includes('already exists') && !error.message.includes('Invalid')) {
-        throw error;
-      }
-    }
+    await ScyllaDb.ping();
   });
 
   afterEach(async () => {
-    // Cleanup: Delete all rows with testing = true
-    try {
-      await ScyllaDb.execute(
-        `DELETE FROM ${keyspace}.${tableName} WHERE testing = true`,
-        []
-      );
-    } catch (error) {
-      // If no rows match, that's fine
-      if (!error.message.includes('does not exist')) {
-        console.warn('Cleanup warning:', error.message);
-      }
-    }
+    await cleanupTestingItems(tableName, PHASE_1_USER_IDS);
   });
 
   afterAll(async () => {
@@ -69,61 +74,44 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       const userId = 'test-user-1.1.1';
       const amount = 100;
       const purpose = 'test_purchase';
-      const metadata = { orderId: 'order-123' };
+      const metadata = { orderId: 'order-123', testing: true };
 
       // Call real TokenManager
       const transaction = await TokenManager.creditPaidTokens(userId, amount, purpose, metadata);
 
-      // Assert: Query DB directly using raw CQL
-      const result = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE id = ?`,
-        [transaction.id]
-      );
+      // Assert: Query DB directly using DynamoDB API
+      const item = await ScyllaDb.getItem(tableName, { id: transaction.id });
 
-      expect(result.rows.length).toBe(1);
-      const row = result.rows[0];
-
-      // cassandra-driver Row objects support .get() method and property access
-      // Column names are lowercase in ScyllaDB (unquoted identifiers)
-      const rowId = row.get ? row.get('id') : row.id;
-      const rowUserId = row.get ? row.get('userid') : row.userid;
-      const rowTransactionType = row.get ? row.get('transactiontype') : row.transactiontype;
-      const rowAmount = row.get ? row.get('amount') : row.amount;
-      const rowPurpose = row.get ? row.get('purpose') : row.purpose;
-      const rowTesting = row.get ? row.get('testing') : row.testing;
-
-      expect(rowId?.toString()).toBe(transaction.id);
-      expect(rowUserId?.toString()).toBe(userId);
-      expect(rowTransactionType?.toString()).toBe(TokenManager.TRANSACTION_TYPES.CREDIT_PAID);
-      expect(Number(rowAmount)).toBe(amount);
-      expect(rowPurpose?.toString()).toBe(purpose);
-      expect(rowTesting).toBe(true); // Must have testing flag
+      expect(item).toBeDefined();
+      expect(item.id).toBe(transaction.id);
+      expect(item.userId).toBe(userId);
+      expect(item.transactionType).toBe(TokenManager.TRANSACTION_TYPES.CREDIT_PAID);
+      expect(Number(item.amount)).toBe(amount);
+      expect(item.purpose).toBe(purpose);
+      expect(item.testing).toBe(true); // Must have testing flag
     });
 
     test('1.1.2 - Create CREDIT_PAID and verify balance via getUserBalance', async () => {
       const userId = 'test-user-1.1.2';
       const amount = 150;
 
-      // Seed: Insert directly via CQL
+      // Seed: Insert directly via DynamoDB API
       const transactionId = require('crypto').randomUUID();
       const now = DateTime.now();
-      await ScyllaDb.execute(
-        `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          transactionId,
-          userId,
-          TokenManager.SYSTEM_BENEFICIARY_ID,
-          TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
-          amount,
-          'test_seed',
-          `ref-${transactionId}`,
-          '9999-12-31T23:59:59.999Z',
-          now,
-          JSON.stringify({}),
-          1,
-          true
-        ]
-      );
+      await ScyllaDb.putItem(tableName, {
+        id: transactionId,
+        userId: userId,
+        beneficiaryId: TokenManager.SYSTEM_BENEFICIARY_ID,
+        transactionType: TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
+        amount: amount,
+        purpose: 'test_seed',
+        refId: `ref-${transactionId}`,
+        expiresAt: '9999-12-31T23:59:59.999Z',
+        createdAt: now,
+        metadata: {},
+        version: 1,
+        testing: true
+      });
 
       // Call real TokenManager
       const balance = await TokenManager.getUserBalance(userId);
@@ -136,28 +124,25 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
     test('1.1.3 - Create multiple CREDIT_PAID transactions and verify aggregate balance', async () => {
       const userId = 'test-user-1.1.3';
 
-      // Seed: Insert multiple transactions via CQL
+      // Seed: Insert multiple transactions via DynamoDB API
       const now = DateTime.now();
       const amounts = [50, 75, 25];
       for (const amount of amounts) {
         const transactionId = require('crypto').randomUUID();
-        await ScyllaDb.execute(
-          `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            transactionId,
-            userId,
-            TokenManager.SYSTEM_BENEFICIARY_ID,
-            TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
-            amount,
-            'test_seed',
-            `ref-${transactionId}`,
-            '9999-12-31T23:59:59.999Z',
-            now,
-            JSON.stringify({}),
-            1,
-            true
-          ]
-        );
+        await ScyllaDb.putItem(tableName, {
+          id: transactionId,
+          userId: userId,
+          beneficiaryId: TokenManager.SYSTEM_BENEFICIARY_ID,
+          transactionType: TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
+          amount: amount,
+          purpose: 'test_seed',
+          refId: `ref-${transactionId}`,
+          expiresAt: '9999-12-31T23:59:59.999Z',
+          createdAt: now,
+          metadata: {},
+          version: 1,
+          testing: true
+        });
       }
 
       // Call real TokenManager
@@ -168,12 +153,20 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       expect(balance.paidTokens).toBe(expectedTotal);
 
       // Verify count in DB
-      const result = await ScyllaDb.execute(
-        `SELECT COUNT(*) as count FROM ${keyspace}.${tableName} WHERE userid = ? AND transactiontype = ? AND testing = true ALLOW FILTERING`,
-        [userId, TokenManager.TRANSACTION_TYPES.CREDIT_PAID]
+      const transactions = await ScyllaDb.query(
+        tableName,
+        'userId = :uid',
+        { ':uid': userId },
+        {
+          IndexName: TokenManager.INDEXES.USER_ID_CREATED_AT,
+          FilterExpression: 'transactionType = :type AND testing = :true',
+          ExpressionAttributeValues: {
+            ':type': TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
+            ':true': true
+          }
+        }
       );
-      const countRow = result.rows[0];
-      expect(Number(countRow.get('count') ?? countRow.count)).toBe(amounts.length);
+      expect(transactions.length).toBe(amounts.length);
     });
   });
 
@@ -182,26 +175,23 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       const userId = 'test-user-1.2.1';
       const amount = 200;
 
-      // Seed: Insert via CQL
+      // Seed: Insert via DynamoDB API
       const transactionId = require('crypto').randomUUID();
       const now = DateTime.now();
-      await ScyllaDb.execute(
-        `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          transactionId,
-          userId,
-          TokenManager.SYSTEM_BENEFICIARY_ID,
-          TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
-          amount,
-          'test_seed',
-          `ref-${transactionId}`,
-          '9999-12-31T23:59:59.999Z',
-          now,
-          JSON.stringify({ test: 'data' }),
-          1,
-          true
-        ]
-      );
+      await ScyllaDb.putItem(tableName, {
+        id: transactionId,
+        userId: userId,
+        beneficiaryId: TokenManager.SYSTEM_BENEFICIARY_ID,
+        transactionType: TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
+        amount: amount,
+        purpose: 'test_seed',
+        refId: `ref-${transactionId}`,
+        expiresAt: '9999-12-31T23:59:59.999Z',
+        createdAt: now,
+        metadata: { test: 'data' },
+        version: 1,
+        testing: true
+      });
 
       // Call real TokenManager (via internal getItem usage in other methods)
       // We'll verify by checking getUserBalance which internally queries
@@ -211,13 +201,9 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       expect(balance.paidTokens).toBe(amount);
 
       // Also verify direct DB read
-      const result = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE id = ?`,
-        [transactionId]
-      );
-      expect(result.rows.length).toBe(1);
-      const row = result.rows[0];
-      expect(Number(row.get('amount') ?? row.amount)).toBe(amount);
+      const item = await ScyllaDb.getItem(tableName, { id: transactionId });
+      expect(item).toBeDefined();
+      expect(Number(item.amount)).toBe(amount);
     });
 
     test('1.2.2 - Read user transactions via query', async () => {
@@ -228,23 +214,20 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       const transactions = [];
       for (let i = 0; i < 3; i++) {
         const transactionId = require('crypto').randomUUID();
-        await ScyllaDb.execute(
-          `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            transactionId,
-            userId,
-            TokenManager.SYSTEM_BENEFICIARY_ID,
-            TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
-            10 * (i + 1),
-            'test_seed',
-            `ref-${transactionId}`,
-            '9999-12-31T23:59:59.999Z',
-            now,
-            JSON.stringify({}),
-            1,
-            true
-          ]
-        );
+        await ScyllaDb.putItem(tableName, {
+          id: transactionId,
+          userId: userId,
+          beneficiaryId: TokenManager.SYSTEM_BENEFICIARY_ID,
+          transactionType: TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
+          amount: 10 * (i + 1),
+          purpose: 'test_seed',
+          refId: `ref-${transactionId}`,
+          expiresAt: '9999-12-31T23:59:59.999Z',
+          createdAt: now,
+          metadata: {},
+          version: 1,
+          testing: true
+        });
         transactions.push(transactionId);
       }
 
@@ -255,11 +238,17 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       expect(balance.paidTokens).toBe(60); // 10 + 20 + 30
 
       // Verify via direct query
-      const result = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE userid = ? AND testing = true ALLOW FILTERING`,
-        [userId]
+      const result = await ScyllaDb.query(
+        tableName,
+        'userId = :uid',
+        { ':uid': userId },
+        {
+          IndexName: TokenManager.INDEXES.USER_ID_CREATED_AT,
+          FilterExpression: 'testing = :true',
+          ExpressionAttributeValues: { ':true': true }
+        }
       );
-      expect(result.rows.length).toBe(3);
+      expect(result.length).toBe(3);
     });
   });
 
@@ -269,26 +258,23 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       const creditAmount = 100;
       const debitAmount = 30;
 
-      // Seed: Insert CREDIT_PAID via CQL
+      // Seed: Insert CREDIT_PAID via DynamoDB API
       const creditId = require('crypto').randomUUID();
       const now = DateTime.now();
-      await ScyllaDb.execute(
-        `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          creditId,
-          userId,
-          TokenManager.SYSTEM_BENEFICIARY_ID,
-          TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
-          creditAmount,
-          'test_seed',
-          `ref-${creditId}`,
-          '9999-12-31T23:59:59.999Z',
-          now,
-          JSON.stringify({}),
-          1,
-          true
-        ]
-      );
+      await ScyllaDb.putItem(tableName, {
+        id: creditId,
+        userId: userId,
+        beneficiaryId: TokenManager.SYSTEM_BENEFICIARY_ID,
+        transactionType: TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
+        amount: creditAmount,
+        purpose: 'test_seed',
+        refId: `ref-${creditId}`,
+        expiresAt: '9999-12-31T23:59:59.999Z',
+        createdAt: now,
+        metadata: {},
+        version: 1,
+        testing: true
+      });
 
       // Verify initial balance
       let balance = await TokenManager.getUserBalance(userId);
@@ -297,7 +283,8 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       // Call real TokenManager - deduct tokens
       const debitTransaction = await TokenManager.deductTokens(userId, debitAmount, {
         beneficiaryId: 'merchant-1',
-        purpose: 'purchase'
+        purpose: 'purchase',
+        metadata: { testing: true }
       });
 
       // Assert: Verify balance after debit
@@ -305,15 +292,11 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       expect(balance.paidTokens).toBe(creditAmount - debitAmount);
 
       // Assert: Verify DEBIT transaction in DB
-      const result = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE id = ?`,
-        [debitTransaction.id]
-      );
-      expect(result.rows.length).toBe(1);
-      const row = result.rows[0];
-      expect(row.get('transactiontype')?.toString() || row.transactiontype?.toString()).toBe(TokenManager.TRANSACTION_TYPES.DEBIT);
-      expect(Number(row.get('amount') ?? row.amount)).toBe(debitAmount);
-      expect(row.get('testing') ?? row.testing).toBe(true);
+      const item = await ScyllaDb.getItem(tableName, { id: debitTransaction.id });
+      expect(item).toBeDefined();
+      expect(item.transactionType).toBe(TokenManager.TRANSACTION_TYPES.DEBIT);
+      expect(Number(item.amount)).toBe(debitAmount);
+      expect(item.testing).toBe(true);
     });
 
     test('1.3.2 - Multiple DEBITs reduce balance correctly', async () => {
@@ -325,28 +308,26 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       // Seed: Insert CREDIT_PAID
       const creditId = require('crypto').randomUUID();
       const now = DateTime.now();
-      await ScyllaDb.execute(
-        `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          creditId,
-          userId,
-          TokenManager.SYSTEM_BENEFICIARY_ID,
-          TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
-          creditAmount,
-          'test_seed',
-          `ref-${creditId}`,
-          '9999-12-31T23:59:59.999Z',
-          now,
-          JSON.stringify({}),
-          1,
-          true
-        ]
-      );
+      await ScyllaDb.putItem(tableName, {
+        id: creditId,
+        userId: userId,
+        beneficiaryId: TokenManager.SYSTEM_BENEFICIARY_ID,
+        transactionType: TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
+        amount: creditAmount,
+        purpose: 'test_seed',
+        refId: `ref-${creditId}`,
+        expiresAt: '9999-12-31T23:59:59.999Z',
+        createdAt: now,
+        metadata: {},
+        version: 1,
+        testing: true
+      });
 
       // First debit
       await TokenManager.deductTokens(userId, debitAmount1, {
         beneficiaryId: 'merchant-1',
-        purpose: 'purchase-1'
+        purpose: 'purchase-1',
+        metadata: { testing: true }
       });
 
       // Verify intermediate balance
@@ -356,7 +337,8 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       // Second debit
       await TokenManager.deductTokens(userId, debitAmount2, {
         beneficiaryId: 'merchant-2',
-        purpose: 'purchase-2'
+        purpose: 'purchase-2',
+        metadata: { testing: true }
       });
 
       // Assert: Final balance
@@ -364,12 +346,20 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       expect(balance.paidTokens).toBe(creditAmount - debitAmount1 - debitAmount2);
 
       // Verify DEBIT count in DB
-      const result = await ScyllaDb.execute(
-        `SELECT COUNT(*) as count FROM ${keyspace}.${tableName} WHERE userid = ? AND transactiontype = ? AND testing = true ALLOW FILTERING`,
-        [userId, TokenManager.TRANSACTION_TYPES.DEBIT]
+      const transactions = await ScyllaDb.query(
+        tableName,
+        'userId = :uid',
+        { ':uid': userId },
+        {
+          IndexName: TokenManager.INDEXES.USER_ID_CREATED_AT,
+          FilterExpression: 'transactionType = :type AND testing = :true',
+          ExpressionAttributeValues: {
+            ':type': TokenManager.TRANSACTION_TYPES.DEBIT,
+            ':true': true
+          }
+        }
       );
-      const countRow = result.rows[0];
-      expect(Number(countRow.get('count') ?? countRow.count)).toBe(2);
+      expect(transactions.length).toBe(2);
     });
   });
 
@@ -377,50 +367,44 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
     test('1.4.1 - Expired CREDIT_FREE tokens are excluded from balance', async () => {
       const userId = 'test-user-1.4.1';
 
-      // Seed: Insert expired CREDIT_FREE via CQL
+      // Seed: Insert expired CREDIT_FREE via DynamoDB API
       const expiredId = require('crypto').randomUUID();
       const pastDate = DateTime.now();
       // Set expiresAt to past (subtract 1 day in seconds)
       const expiredAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
       
-      await ScyllaDb.execute(
-        `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          expiredId,
-          userId,
-          TokenManager.SYSTEM_BENEFICIARY_ID,
-          TokenManager.TRANSACTION_TYPES.CREDIT_FREE,
-          50,
-          'test_seed',
-          `ref-${expiredId}`,
-          expiredAt,
-          pastDate,
-          JSON.stringify({}),
-          1,
-          true
-        ]
-      );
+      await ScyllaDb.putItem(tableName, {
+        id: expiredId,
+        userId: userId,
+        beneficiaryId: TokenManager.SYSTEM_BENEFICIARY_ID,
+        transactionType: TokenManager.TRANSACTION_TYPES.CREDIT_FREE,
+        amount: 50,
+        purpose: 'test_seed',
+        refId: `ref-${expiredId}`,
+        expiresAt: expiredAt,
+        createdAt: pastDate,
+        metadata: {},
+        version: 1,
+        testing: true
+      });
 
       // Seed: Insert non-expired CREDIT_FREE
       const validId = require('crypto').randomUUID();
       const futureDate = DateTime.future(30 * 24 * 60 * 60); // 30 days
-      await ScyllaDb.execute(
-        `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          validId,
-          userId,
-          TokenManager.SYSTEM_BENEFICIARY_ID,
-          TokenManager.TRANSACTION_TYPES.CREDIT_FREE,
-          30,
-          'test_seed',
-          `ref-${validId}`,
-          futureDate,
-          pastDate,
-          JSON.stringify({}),
-          1,
-          true
-        ]
-      );
+      await ScyllaDb.putItem(tableName, {
+        id: validId,
+        userId: userId,
+        beneficiaryId: TokenManager.SYSTEM_BENEFICIARY_ID,
+        transactionType: TokenManager.TRANSACTION_TYPES.CREDIT_FREE,
+        amount: 30,
+        purpose: 'test_seed',
+        refId: `ref-${validId}`,
+        expiresAt: futureDate,
+        createdAt: pastDate,
+        metadata: {},
+        version: 1,
+        testing: true
+      });
 
       // Call real TokenManager
       const balance = await TokenManager.getUserBalance(userId);
@@ -433,67 +417,29 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
     test('1.4.2 - processExpiredHolds expires HOLD transactions', async () => {
       const userId = 'test-user-1.4.2';
 
-      // Seed: Insert CREDIT_PAID
-      const creditId = require('crypto').randomUUID();
-      const now = DateTime.now();
-      await ScyllaDb.execute(
-        `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          creditId,
-          userId,
-          TokenManager.SYSTEM_BENEFICIARY_ID,
-          TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
-          100,
-          'test_seed',
-          `ref-${creditId}`,
-          '9999-12-31T23:59:59.999Z',
-          now,
-          JSON.stringify({}),
-          1,
-          true
-        ]
-      );
+      // Seed: CREDIT_PAID via TokenManager
+      await TokenManager.creditPaidTokens(userId, 100, 'test_seed', { testing: true });
 
-      // Seed: Insert expired HOLD (created more than 1800 seconds ago)
-      const holdId = require('crypto').randomUUID();
-      const oldCreatedAt = new Date(Date.now() - 2000 * 1000).toISOString(); // 2000 seconds ago
-      await ScyllaDb.execute(
-        `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, state, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          holdId,
-          userId,
-          userId,
-          TokenManager.TRANSACTION_TYPES.HOLD,
-          20,
-          'test_hold',
-          `ref-${holdId}`,
-          '9999-12-31T23:59:59.999Z',
-          oldCreatedAt,
-          JSON.stringify({}),
-          1,
-          TokenManager.HOLD_STATES.OPEN,
-          true
-        ]
-      );
+      // Create HOLD via TokenManager with 2-second expiry (ensures GSI is populated)
+      const hold = await TokenManager.holdTokens(userId, 20, 'merchant-1', {
+        refId: 'ref-process-expired-1.4.2',
+        expiresAfter: 2,
+        metadata: { testing: true }
+      });
 
       // Verify HOLD exists and is OPEN
-      let result = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE id = ?`,
-        [holdId]
-      );
-      let row = result.rows[0];
-      expect(row.get('state')?.toString() || row.state?.toString()).toBe(TokenManager.HOLD_STATES.OPEN);
+      let item = await ScyllaDb.getItem(tableName, { id: hold.id });
+      expect(item.state).toBe(TokenManager.HOLD_STATES.OPEN);
 
-      // Call real TokenManager - process expired holds
-      await TokenManager.processExpiredHolds(1800, 1000);
+      // Wait for hold to expire (expiresAt in the past)
+      await new Promise(r => setTimeout(r, 3000));
+
+      // Call real TokenManager - process expired holds (expiredForSeconds=0 means any expired)
+      await TokenManager.processExpiredHolds(0, 1000);
 
       // Assert: HOLD should be reversed
-      result = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE id = ?`,
-        [holdId]
-      );
-      row = result.rows[0];
-      expect(row.get('state')?.toString() || row.state?.toString()).toBe(TokenManager.HOLD_STATES.REVERSED);
+      item = await ScyllaDb.getItem(tableName, { id: hold.id });
+      expect(item.state).toBe(TokenManager.HOLD_STATES.REVERSED);
     });
   });
 
@@ -506,23 +452,20 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       // Seed: CREDIT_PAID
       const creditId = require('crypto').randomUUID();
       const now = DateTime.now();
-      await ScyllaDb.execute(
-        `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          creditId,
-          userId,
-          TokenManager.SYSTEM_BENEFICIARY_ID,
-          TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
-          creditAmount,
-          'test_seed',
-          `ref-${creditId}`,
-          '9999-12-31T23:59:59.999Z',
-          now,
-          JSON.stringify({}),
-          1,
-          true
-        ]
-      );
+      await ScyllaDb.putItem(tableName, {
+        id: creditId,
+        userId: userId,
+        beneficiaryId: TokenManager.SYSTEM_BENEFICIARY_ID,
+        transactionType: TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
+        amount: creditAmount,
+        purpose: 'test_seed',
+        refId: `ref-${creditId}`,
+        expiresAt: '9999-12-31T23:59:59.999Z',
+        createdAt: now,
+        metadata: {},
+        version: 1,
+        testing: true
+      });
 
       // Verify initial balance
       let balance = await TokenManager.getUserBalance(userId);
@@ -531,7 +474,8 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       // DEBIT
       await TokenManager.deductTokens(userId, debitAmount, {
         beneficiaryId: 'merchant-1',
-        purpose: 'purchase'
+        purpose: 'purchase',
+        metadata: { testing: true }
       });
 
       // Assert: Final balance via TokenManager
@@ -539,19 +483,35 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       expect(balance.paidTokens).toBe(creditAmount - debitAmount);
 
       // Assert: Verify via raw DB query
-      const creditResult = await ScyllaDb.execute(
-        `SELECT SUM(amount) as total FROM ${keyspace}.${tableName} WHERE userid = ? AND transactiontype = ? AND testing = true ALLOW FILTERING`,
-        [userId, TokenManager.TRANSACTION_TYPES.CREDIT_PAID]
+      const creditTransactions = await ScyllaDb.query(
+        tableName,
+        'userId = :uid',
+        { ':uid': userId },
+        {
+          IndexName: TokenManager.INDEXES.USER_ID_CREATED_AT,
+          FilterExpression: 'transactionType = :type AND testing = :true',
+          ExpressionAttributeValues: {
+            ':type': TokenManager.TRANSACTION_TYPES.CREDIT_PAID,
+            ':true': true
+          }
+        }
       );
-      const debitResult = await ScyllaDb.execute(
-        `SELECT SUM(amount) as total FROM ${keyspace}.${tableName} WHERE userid = ? AND transactiontype = ? AND testing = true ALLOW FILTERING`,
-        [userId, TokenManager.TRANSACTION_TYPES.DEBIT]
+      const debitTransactions = await ScyllaDb.query(
+        tableName,
+        'userId = :uid',
+        { ':uid': userId },
+        {
+          IndexName: TokenManager.INDEXES.USER_ID_CREATED_AT,
+          FilterExpression: 'transactionType = :type AND testing = :true',
+          ExpressionAttributeValues: {
+            ':type': TokenManager.TRANSACTION_TYPES.DEBIT,
+            ':true': true
+          }
+        }
       );
 
-      const creditRow = creditResult.rows[0];
-      const debitRow = debitResult.rows[0];
-      const totalCredits = Number(creditRow.get('total') ?? creditRow.total ?? 0);
-      const totalDebits = Number(debitRow.get('total') ?? debitRow.total ?? 0);
+      const totalCredits = creditTransactions.reduce((sum, tx) => sum + Number(tx.amount || 0), 0);
+      const totalDebits = debitTransactions.reduce((sum, tx) => sum + Number(tx.amount || 0), 0);
       expect(totalCredits - totalDebits).toBe(creditAmount - debitAmount);
     });
 
@@ -559,29 +519,26 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
       const userId = 'test-user-1.5.2';
 
       // Seed: CREDIT_PAID
-      await TokenManager.creditPaidTokens(userId, 100, 'test', {});
+      await TokenManager.creditPaidTokens(userId, 100, 'test', { testing: true });
 
-      // Seed: CREDIT_FREE via CQL
+      // Seed: CREDIT_FREE via DynamoDB API
       const freeId = require('crypto').randomUUID();
       const now = DateTime.now();
       const futureDate = DateTime.future(30 * 24 * 60 * 60);
-      await ScyllaDb.execute(
-        `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          freeId,
-          userId,
-          TokenManager.SYSTEM_BENEFICIARY_ID,
-          TokenManager.TRANSACTION_TYPES.CREDIT_FREE,
-          50,
-          'test_seed',
-          `ref-${freeId}`,
-          futureDate,
-          now,
-          JSON.stringify({}),
-          1,
-          true
-        ]
-      );
+      await ScyllaDb.putItem(tableName, {
+        id: freeId,
+        userId: userId,
+        beneficiaryId: TokenManager.SYSTEM_BENEFICIARY_ID,
+        transactionType: TokenManager.TRANSACTION_TYPES.CREDIT_FREE,
+        amount: 50,
+        purpose: 'test_seed',
+        refId: `ref-${freeId}`,
+        expiresAt: futureDate,
+        createdAt: now,
+        metadata: {},
+        version: 1,
+        testing: true
+      });
 
       // Call real TokenManager
       const balance = await TokenManager.getUserBalance(userId);
@@ -594,27 +551,26 @@ describe('TokenManager Integration Tests - Phase 1: Core CRUD', () => {
   });
 });
 
+// Phase 2 user IDs (each test uses unique userId; add new IDs when adding tests)
+const PHASE_2_USER_IDS = [
+  'test-user-2.1.1', 'test-user-2.1.2', 'test-user-2.1.3',
+  'test-payer-2.1.4', 'test-beneficiary-2.1.4',
+  'test-user-2.2.1', 'test-user-2.2.2', 'test-user-2.2.3',
+  'test-sender-2.3.1', 'test-receiver-2.3.1',
+  'test-sender-2.3.2', 'test-receiver-2.3.2',
+  'test-user-2.4.1', 'test-user-2.4.2', 'test-user-2.4.3'
+];
+
 describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE, and Advanced Scenarios', () => {
-  const keyspace = process.env.SCYLLA_KEYSPACE || 'app_keyspace';
   const tableName = TokenManager.TABLES.TOKEN_REGISTRY;
 
   beforeAll(async () => {
     // Ensure connection
-    await ScyllaDb.execute('SELECT now() FROM system.local', []);
+    await ScyllaDb.ping();
   });
 
   afterEach(async () => {
-    // Cleanup: Delete all rows with testing = true
-    try {
-      await ScyllaDb.execute(
-        `DELETE FROM ${keyspace}.${tableName} WHERE testing = true`,
-        []
-      );
-    } catch (error) {
-      if (!error.message.includes('does not exist')) {
-        console.warn('Cleanup warning:', error.message);
-      }
-    }
+    await cleanupTestingItems(tableName, PHASE_2_USER_IDS);
   });
 
   afterAll(async () => {
@@ -629,27 +585,24 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       const holdAmount = 50;
 
       // Seed: Insert CREDIT_PAID
-      await TokenManager.creditPaidTokens(userId, 100, 'test_seed', {});
+      await TokenManager.creditPaidTokens(userId, 100, 'test_seed', { testing: true });
 
       // Call real TokenManager - create HOLD
       const hold = await TokenManager.holdTokens(userId, holdAmount, beneficiaryId, {
         refId: 'booking-123',
-        purpose: 'booking_hold'
+        purpose: 'booking_hold',
+        metadata: { testing: true }
       });
 
       // Assert: Verify HOLD transaction in DB
-      const result = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE id = ?`,
-        [hold.id]
-      );
-      expect(result.rows.length).toBe(1);
-      const row = result.rows[0];
-      expect(row.get('transactiontype')?.toString() || row.transactiontype?.toString()).toBe(TokenManager.TRANSACTION_TYPES.HOLD);
-      expect(row.get('state')?.toString() || row.state?.toString()).toBe(TokenManager.HOLD_STATES.OPEN);
-      expect(Number(row.get('amount') ?? row.amount)).toBe(holdAmount);
-      expect(row.get('userid')?.toString() || row.userid?.toString()).toBe(userId);
-      expect(row.get('beneficiaryid')?.toString() || row.beneficiaryid?.toString()).toBe(beneficiaryId);
-      expect(row.get('testing') ?? row.testing).toBe(true);
+      const item = await ScyllaDb.getItem(tableName, { id: hold.id });
+      expect(item).toBeDefined();
+      expect(item.transactionType).toBe(TokenManager.TRANSACTION_TYPES.HOLD);
+      expect(item.state).toBe(TokenManager.HOLD_STATES.OPEN);
+      expect(Number(item.amount)).toBe(holdAmount);
+      expect(item.userId).toBe(userId);
+      expect(item.beneficiaryId).toBe(beneficiaryId);
+      expect(item.testing).toBe(true);
 
       // Assert: Balance should reflect HOLD deduction
       const balance = await TokenManager.getUserBalance(userId);
@@ -662,31 +615,24 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       const holdAmount = 30;
 
       // Seed: Insert CREDIT_PAID
-      await TokenManager.creditPaidTokens(userId, 100, 'test_seed', {});
+      await TokenManager.creditPaidTokens(userId, 100, 'test_seed', { testing: true });
 
       // Create HOLD
       const hold = await TokenManager.holdTokens(userId, holdAmount, beneficiaryId, {
-        refId: 'booking-456'
+        refId: 'booking-456',
+        metadata: { testing: true }
       });
 
       // Verify HOLD is OPEN
-      let result = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE id = ?`,
-        [hold.id]
-      );
-      let row = result.rows[0];
-      expect(row.get('state')?.toString() || row.state?.toString()).toBe(TokenManager.HOLD_STATES.OPEN);
+      let item = await ScyllaDb.getItem(tableName, { id: hold.id });
+      expect(item.state).toBe(TokenManager.HOLD_STATES.OPEN);
 
       // Call real TokenManager - capture HOLD
       const captured = await TokenManager.captureHeldTokens({ transactionId: hold.id });
 
       // Assert: HOLD state should be CAPTURED
-      result = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE id = ?`,
-        [hold.id]
-      );
-      row = result.rows[0];
-      expect(row.get('state')?.toString() || row.state?.toString()).toBe(TokenManager.HOLD_STATES.CAPTURED);
+      item = await ScyllaDb.getItem(tableName, { id: hold.id });
+      expect(item.state).toBe(TokenManager.HOLD_STATES.CAPTURED);
 
       // Assert: Balance should remain reduced (captured HOLD doesn't restore balance)
       const balance = await TokenManager.getUserBalance(userId);
@@ -699,11 +645,12 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       const holdAmount = 25;
 
       // Seed: Insert CREDIT_PAID
-      await TokenManager.creditPaidTokens(userId, 100, 'test_seed', {});
+      await TokenManager.creditPaidTokens(userId, 100, 'test_seed', { testing: true });
 
       // Create HOLD
       const hold = await TokenManager.holdTokens(userId, holdAmount, beneficiaryId, {
-        refId: 'booking-789'
+        refId: 'booking-789',
+        metadata: { testing: true }
       });
 
       // Verify balance reduced
@@ -714,12 +661,8 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       await TokenManager.reverseHeldTokens({ transactionId: hold.id });
 
       // Assert: HOLD state should be REVERSED
-      const result = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE id = ?`,
-        [hold.id]
-      );
-      const row = result.rows[0];
-      expect(row.get('state')?.toString() || row.state?.toString()).toBe(TokenManager.HOLD_STATES.REVERSED);
+      const item = await ScyllaDb.getItem(tableName, { id: hold.id });
+      expect(item.state).toBe(TokenManager.HOLD_STATES.REVERSED);
 
       // Assert: Balance should be restored
       balance = await TokenManager.getUserBalance(userId);
@@ -732,11 +675,12 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       const holdAmount = 40;
 
       // Seed: Insert CREDIT_PAID for payer
-      await TokenManager.creditPaidTokens(payer, 100, 'test_seed', {});
+      await TokenManager.creditPaidTokens(payer, 100, 'test_seed', { testing: true });
 
       // Create HOLD (payer holds tokens for beneficiary)
       const hold = await TokenManager.holdTokens(payer, holdAmount, beneficiary, {
-        refId: 'transfer-hold-1'
+        refId: 'transfer-hold-1',
+        metadata: { testing: true }
       });
 
       // Assert: Payer balance reduced
@@ -772,20 +716,17 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
         TokenManager.SYSTEM_BENEFICIARY_ID,
         amount,
         expiresAt,
-        'promo_grant'
+        'promo_grant',
+        { testing: true }
       );
 
       // Assert: Verify CREDIT_FREE transaction in DB
-      const result = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE id = ?`,
-        [transaction.id]
-      );
-      expect(result.rows.length).toBe(1);
-      const row = result.rows[0];
-      expect(row.get('transactiontype')?.toString() || row.transactiontype?.toString()).toBe(TokenManager.TRANSACTION_TYPES.CREDIT_FREE);
-      expect(row.get('beneficiaryid')?.toString() || row.beneficiaryid?.toString()).toBe(TokenManager.SYSTEM_BENEFICIARY_ID);
-      expect(Number(row.get('amount') ?? row.amount)).toBe(amount);
-      expect(row.get('testing') ?? row.testing).toBe(true);
+      const item = await ScyllaDb.getItem(tableName, { id: transaction.id });
+      expect(item).toBeDefined();
+      expect(item.transactionType).toBe(TokenManager.TRANSACTION_TYPES.CREDIT_FREE);
+      expect(item.beneficiaryId).toBe(TokenManager.SYSTEM_BENEFICIARY_ID);
+      expect(Number(item.amount)).toBe(amount);
+      expect(item.testing).toBe(true);
 
       // Assert: Balance should include free tokens
       const balance = await TokenManager.getUserBalance(userId);
@@ -800,7 +741,7 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       const expiresAt = DateTime.future(60 * 24 * 60 * 60); // 60 days
 
       // Call real TokenManager - credit free tokens
-      await TokenManager.creditFreeTokens(userId, creatorId, amount, expiresAt, 'subscription_bonus');
+      await TokenManager.creditFreeTokens(userId, creatorId, amount, expiresAt, 'subscription_bonus', { testing: true });
 
       // Assert: Balance should include creator-specific free tokens
       const balance = await TokenManager.getUserBalance(userId);
@@ -817,30 +758,60 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       const creator1Amount = 50;
       const creator2Amount = 25;
 
-      // Seed: Insert multiple CREDIT_FREE via CQL
+      // Seed: Insert multiple CREDIT_FREE via DynamoDB API
       const now = DateTime.now();
       const futureDate = DateTime.future(30 * 24 * 60 * 60);
 
       // System free tokens
       const systemId = require('crypto').randomUUID();
-      await ScyllaDb.execute(
-        `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [systemId, userId, TokenManager.SYSTEM_BENEFICIARY_ID, TokenManager.TRANSACTION_TYPES.CREDIT_FREE, systemAmount, 'system_promo', `ref-${systemId}`, futureDate, now, JSON.stringify({}), 1, true]
-      );
+      await ScyllaDb.putItem(tableName, {
+        id: systemId,
+        userId: userId,
+        beneficiaryId: TokenManager.SYSTEM_BENEFICIARY_ID,
+        transactionType: TokenManager.TRANSACTION_TYPES.CREDIT_FREE,
+        amount: systemAmount,
+        purpose: 'system_promo',
+        refId: `ref-${systemId}`,
+        expiresAt: futureDate,
+        createdAt: now,
+        metadata: {},
+        version: 1,
+        testing: true
+      });
 
       // Creator 1 free tokens
       const creator1Id = require('crypto').randomUUID();
-      await ScyllaDb.execute(
-        `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [creator1Id, userId, creator1, TokenManager.TRANSACTION_TYPES.CREDIT_FREE, creator1Amount, 'creator1_bonus', `ref-${creator1Id}`, futureDate, now, JSON.stringify({}), 1, true]
-      );
+      await ScyllaDb.putItem(tableName, {
+        id: creator1Id,
+        userId: userId,
+        beneficiaryId: creator1,
+        transactionType: TokenManager.TRANSACTION_TYPES.CREDIT_FREE,
+        amount: creator1Amount,
+        purpose: 'creator1_bonus',
+        refId: `ref-${creator1Id}`,
+        expiresAt: futureDate,
+        createdAt: now,
+        metadata: {},
+        version: 1,
+        testing: true
+      });
 
       // Creator 2 free tokens
       const creator2Id = require('crypto').randomUUID();
-      await ScyllaDb.execute(
-        `INSERT INTO ${keyspace}.${tableName} (id, userid, beneficiaryid, transactiontype, amount, purpose, refid, expiresat, createdat, metadata, version, testing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [creator2Id, userId, creator2, TokenManager.TRANSACTION_TYPES.CREDIT_FREE, creator2Amount, 'creator2_bonus', `ref-${creator2Id}`, futureDate, now, JSON.stringify({}), 1, true]
-      );
+      await ScyllaDb.putItem(tableName, {
+        id: creator2Id,
+        userId: userId,
+        beneficiaryId: creator2,
+        transactionType: TokenManager.TRANSACTION_TYPES.CREDIT_FREE,
+        amount: creator2Amount,
+        purpose: 'creator2_bonus',
+        refId: `ref-${creator2Id}`,
+        expiresAt: futureDate,
+        createdAt: now,
+        metadata: {},
+        version: 1,
+        testing: true
+      });
 
       // Call real TokenManager
       const balance = await TokenManager.getUserBalance(userId);
@@ -860,7 +831,7 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       const transferAmount = 30;
 
       // Seed: Insert CREDIT_PAID for sender
-      await TokenManager.creditPaidTokens(senderId, 100, 'test_seed', {});
+      await TokenManager.creditPaidTokens(senderId, 100, 'test_seed', { testing: true });
 
       // Call real TokenManager - transfer tokens
       const tipTransaction = await TokenManager.transferTokens(
@@ -868,21 +839,17 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
         receiverId,
         transferAmount,
         'tip',
-        { refId: 'tip-123' }
+        { refId: 'tip-123', metadata: { testing: true } }
       );
 
       // Assert: Verify TIP transaction in DB
-      const result = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE id = ?`,
-        [tipTransaction.id]
-      );
-      expect(result.rows.length).toBe(1);
-      const row = result.rows[0];
-      expect(row.get('transactiontype')?.toString() || row.transactiontype?.toString()).toBe(TokenManager.TRANSACTION_TYPES.TIP);
-      expect(Number(row.get('amount') ?? row.amount)).toBe(transferAmount);
-      expect(row.get('userid')?.toString() || row.userid?.toString()).toBe(senderId);
-      expect(row.get('beneficiaryid')?.toString() || row.beneficiaryid?.toString()).toBe(receiverId);
-      expect(row.get('testing') ?? row.testing).toBe(true);
+      const item = await ScyllaDb.getItem(tableName, { id: tipTransaction.transactionId });
+      expect(item).toBeDefined();
+      expect(item.transactionType).toBe(TokenManager.TRANSACTION_TYPES.TIP);
+      expect(Number(item.amount)).toBe(transferAmount);
+      expect(item.userId).toBe(senderId);
+      expect(item.beneficiaryId).toBe(receiverId);
+      expect(item.testing).toBe(true);
 
       // Assert: Sender balance reduced
       const senderBalance = await TokenManager.getUserBalance(senderId);
@@ -899,14 +866,14 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       const transferAmount = 40;
 
       // Seed: Insert CREDIT_PAID
-      await TokenManager.creditPaidTokens(senderId, 50, 'test_seed', {});
+      await TokenManager.creditPaidTokens(senderId, 50, 'test_seed', { testing: true });
 
       // Seed: Insert beneficiary-specific CREDIT_FREE
       const creatorId = 'creator-transfer';
-      await TokenManager.creditFreeTokens(senderId, creatorId, 30, DateTime.future(30 * 24 * 60 * 60), 'bonus');
+      await TokenManager.creditFreeTokens(senderId, creatorId, 30, DateTime.future(30 * 24 * 60 * 60), 'bonus', { testing: true });
 
       // Seed: Insert system CREDIT_FREE
-      await TokenManager.creditFreeTokens(senderId, TokenManager.SYSTEM_BENEFICIARY_ID, 20, DateTime.future(30 * 24 * 60 * 60), 'promo');
+      await TokenManager.creditFreeTokens(senderId, TokenManager.SYSTEM_BENEFICIARY_ID, 20, DateTime.future(30 * 24 * 60 * 60), 'promo', { testing: true });
 
       // Verify initial balance
       let balance = await TokenManager.getUserBalance(senderId);
@@ -914,7 +881,7 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       expect(balance.totalFreeTokens).toBe(50); // 30 + 20
 
       // Call real TokenManager - transfer (should consume free tokens first)
-      await TokenManager.transferTokens(senderId, receiverId, transferAmount, 'tip');
+      await TokenManager.transferTokens(senderId, receiverId, transferAmount, 'tip', { metadata: { testing: true } });
 
       // Assert: Sender balance after transfer
       balance = await TokenManager.getUserBalance(senderId);
@@ -933,14 +900,14 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       const userId = 'test-user-2.4.1';
 
       // Seed: CREDIT_PAID
-      await TokenManager.creditPaidTokens(userId, 200, 'purchase', {});
+      await TokenManager.creditPaidTokens(userId, 200, 'purchase', { testing: true });
 
       // Seed: CREDIT_FREE (system)
-      await TokenManager.creditFreeTokens(userId, TokenManager.SYSTEM_BENEFICIARY_ID, 50, DateTime.future(30 * 24 * 60 * 60), 'promo');
+      await TokenManager.creditFreeTokens(userId, TokenManager.SYSTEM_BENEFICIARY_ID, 50, DateTime.future(30 * 24 * 60 * 60), 'promo', { testing: true });
 
       // Seed: CREDIT_FREE (creator)
       const creatorId = 'creator-mixed';
-      await TokenManager.creditFreeTokens(userId, creatorId, 30, DateTime.future(30 * 24 * 60 * 60), 'bonus');
+      await TokenManager.creditFreeTokens(userId, creatorId, 30, DateTime.future(30 * 24 * 60 * 60), 'bonus', { testing: true });
 
       // Verify initial balance
       let balance = await TokenManager.getUserBalance(userId);
@@ -948,26 +915,27 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       expect(balance.totalFreeTokens).toBe(80); // 50 + 30
 
       // Create HOLD
-      const hold = await TokenManager.holdTokens(userId, 40, 'merchant-1', { refId: 'hold-mixed' });
+      const hold = await TokenManager.holdTokens(userId, 40, 'merchant-1', { refId: 'hold-mixed', metadata: { testing: true } });
 
       // Verify balance after HOLD
       balance = await TokenManager.getUserBalance(userId);
       expect(balance.paidTokens).toBe(160); // 200 - 40
 
-      // DEBIT
-      await TokenManager.deductTokens(userId, 30, { beneficiaryId: 'merchant-2', purpose: 'purchase' });
+      // DEBIT (consumes free tokens first: 30 from 80 free, so paid stays 160)
+      await TokenManager.deductTokens(userId, 30, { beneficiaryId: 'merchant-2', purpose: 'purchase', metadata: { testing: true } });
 
       // Verify balance after DEBIT
       balance = await TokenManager.getUserBalance(userId);
-      expect(balance.paidTokens).toBe(130); // 160 - 30
+      expect(balance.paidTokens).toBe(160); // DEBIT used 30 free, paid unchanged
+      expect(balance.totalFreeTokens).toBe(50); // 80 - 30 free consumed
 
       // Capture HOLD
       await TokenManager.captureHeldTokens({ transactionId: hold.id });
 
       // Verify final balance
       balance = await TokenManager.getUserBalance(userId);
-      expect(balance.paidTokens).toBe(130); // Still reduced (captured HOLD doesn't restore)
-      expect(balance.totalFreeTokens).toBe(80); // Free tokens unchanged
+      expect(balance.paidTokens).toBe(160); // Still 160 (captured HOLD doesn't change paid)
+      expect(balance.totalFreeTokens).toBe(50); // Free tokens reduced by DEBIT
     });
 
     test('2.4.2 - DEBIT consumes free tokens before paid (priority order)', async () => {
@@ -975,16 +943,16 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       const beneficiaryId = 'merchant-priority';
 
       // Seed: CREDIT_PAID
-      await TokenManager.creditPaidTokens(userId, 100, 'purchase', {});
+      await TokenManager.creditPaidTokens(userId, 100, 'purchase', { testing: true });
 
       // Seed: Beneficiary-specific CREDIT_FREE
-      await TokenManager.creditFreeTokens(userId, beneficiaryId, 25, DateTime.future(30 * 24 * 60 * 60), 'bonus');
+      await TokenManager.creditFreeTokens(userId, beneficiaryId, 25, DateTime.future(30 * 24 * 60 * 60), 'bonus', { testing: true });
 
       // Seed: System CREDIT_FREE
-      await TokenManager.creditFreeTokens(userId, TokenManager.SYSTEM_BENEFICIARY_ID, 15, DateTime.future(30 * 24 * 60 * 60), 'promo');
+      await TokenManager.creditFreeTokens(userId, TokenManager.SYSTEM_BENEFICIARY_ID, 15, DateTime.future(30 * 24 * 60 * 60), 'promo', { testing: true });
 
       // DEBIT that consumes: 25 (beneficiary) + 15 (system) + 10 (paid) = 50
-      await TokenManager.deductTokens(userId, 50, { beneficiaryId, purpose: 'purchase' });
+      await TokenManager.deductTokens(userId, 50, { beneficiaryId, purpose: 'purchase', metadata: { testing: true } });
 
       // Assert: Balance after DEBIT
       const balance = await TokenManager.getUserBalance(userId);
@@ -994,17 +962,26 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       expect(balance.freeTokensPerBeneficiary[TokenManager.SYSTEM_BENEFICIARY_ID] || 0).toBe(0);
 
       // Verify DEBIT transaction has free token tracking
-      const debitResult = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE userid = ? AND transactiontype = ? AND testing = true ALLOW FILTERING`,
-        [userId, TokenManager.TRANSACTION_TYPES.DEBIT]
+      const debitTransactions = await ScyllaDb.query(
+        tableName,
+        'userId = :uid',
+        { ':uid': userId },
+        {
+          IndexName: TokenManager.INDEXES.USER_ID_CREATED_AT,
+          FilterExpression: 'transactionType = :type AND testing = :true',
+          ExpressionAttributeValues: {
+            ':type': TokenManager.TRANSACTION_TYPES.DEBIT,
+            ':true': true
+          }
+        }
       );
-      expect(debitResult.rows.length).toBe(1);
-      const debitRow = debitResult.rows[0];
-      const freeBeneficiaryConsumed = Number(debitRow.get('freebeneficiaryconsumed') ?? debitRow.freebeneficiaryconsumed ?? 0);
-      const freeSystemConsumed = Number(debitRow.get('freesystemconsumed') ?? debitRow.freesystemconsumed ?? 0);
+      expect(debitTransactions.length).toBe(1);
+      const debitItem = debitTransactions[0];
+      const freeBeneficiaryConsumed = Number(debitItem.freeBeneficiaryConsumed || 0);
+      const freeSystemConsumed = Number(debitItem.freeSystemConsumed || 0);
       expect(freeBeneficiaryConsumed).toBe(25);
       expect(freeSystemConsumed).toBe(15);
-      expect(Number(debitRow.get('amount') ?? debitRow.amount)).toBe(10); // Only paid portion
+      expect(Number(debitItem.amount)).toBe(10); // Only paid portion
     });
 
     test('2.4.3 - HOLD lifecycle: create, capture, verify balance invariants', async () => {
@@ -1013,18 +990,14 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       const holdAmount = 35;
 
       // Seed: CREDIT_PAID
-      await TokenManager.creditPaidTokens(userId, 100, 'purchase', {});
+      await TokenManager.creditPaidTokens(userId, 100, 'purchase', { testing: true });
 
       // Create HOLD
-      const hold = await TokenManager.holdTokens(userId, holdAmount, beneficiaryId, { refId: 'lifecycle-1' });
+      const hold = await TokenManager.holdTokens(userId, holdAmount, beneficiaryId, { refId: 'lifecycle-1', metadata: { testing: true } });
 
       // Verify HOLD state and balance
-      let result = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE id = ?`,
-        [hold.id]
-      );
-      let row = result.rows[0];
-      expect(row.get('state')?.toString() || row.state?.toString()).toBe(TokenManager.HOLD_STATES.OPEN);
+      let item = await ScyllaDb.getItem(tableName, { id: hold.id });
+      expect(item.state).toBe(TokenManager.HOLD_STATES.OPEN);
       
       let balance = await TokenManager.getUserBalance(userId);
       expect(balance.paidTokens).toBe(100 - holdAmount);
@@ -1033,19 +1006,15 @@ describe('TokenManager Integration Tests - Phase 2: HOLD Operations, CREDIT_FREE
       await TokenManager.captureHeldTokens({ transactionId: hold.id });
 
       // Verify HOLD state changed
-      result = await ScyllaDb.execute(
-        `SELECT * FROM ${keyspace}.${tableName} WHERE id = ?`,
-        [hold.id]
-      );
-      row = result.rows[0];
-      expect(row.get('state')?.toString() || row.state?.toString()).toBe(TokenManager.HOLD_STATES.CAPTURED);
+      item = await ScyllaDb.getItem(tableName, { id: hold.id });
+      expect(item.state).toBe(TokenManager.HOLD_STATES.CAPTURED);
       
       // Verify balance unchanged (captured HOLD doesn't restore)
       balance = await TokenManager.getUserBalance(userId);
       expect(balance.paidTokens).toBe(100 - holdAmount);
 
       // Verify version was incremented
-      const version = Number(row.get('version') ?? row.version ?? 1);
+      const version = Number(item.version || 1);
       expect(version).toBeGreaterThan(1); // Version should increment on update
     });
   });

@@ -1,0 +1,32 @@
+{
+  "name": "payment",
+  "version": "1.0.0",
+  "description": "Payment Gateway module - independently deployable",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "init-tables": "node scripts/init-tables.js",
+    "seed": "node scripts/seed-payment-gateway-data.js",
+    "seed:demo": "node scripts/seed-admin-demo-data.js",
+    "test": "jest"
+  },
+  "keywords": ["payment", "gateway"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.985.0",
+    "@aws-sdk/util-dynamodb": "^3.985.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "joi": "^18.0.2",
+    "lru-cache": "^11.2.4",
+    "luxon": "^3.7.2",
+    "morgan": "^1.10.1"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nodemon": "^3.1.11"
+  }
+}

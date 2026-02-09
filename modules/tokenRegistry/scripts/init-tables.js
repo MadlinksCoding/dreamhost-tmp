@@ -1,17 +1,13 @@
 /**
- * Create all DynamoDB (Alternator) tables required by the API:
- * - TokenRegistry (user-tokens, token-registry/sales-registry)
- * - paymentGateway_sessions, paymentGateway_transactions, paymentGateway_schedules,
- *   paymentGateway_tokens, paymentGateway_webhooks
+ * Initialize DynamoDB (Alternator) tables for Token Registry module:
+ * - TokenRegistry (with all GSIs)
  *
- * Run automatically before API start in Docker, or manually:
- *   NODE_ENV=test DYNAMODB_ENDPOINT=http://scylladb:8000 node scripts/init-dynamo-tables.js
+ * Run manually:
+ *   NODE_ENV=test DYNAMODB_ENDPOINT=http://localhost:8000 node modules/tokenRegistry/scripts/init-tables.js
  */
 
-const path = require('path');
-const ScyllaDb = require('../modules/tokenRegistry/src/utils/ScyllaDb.js');
-const { createAllTablesFromJson } = require('../modules/tokenRegistry/src/utils/createTable.js');
-const TokenManager = require('../modules/tokenRegistry/src/services/TokenManager.js');
+const ScyllaDb = require('../src/utils/ScyllaDb.js');
+const TokenManager = require('../src/services/TokenManager.js');
 
 const TABLE_TOKEN_REGISTRY = TokenManager.TABLES.TOKEN_REGISTRY;
 
@@ -116,7 +112,7 @@ async function ensureTokenRegistry() {
 }
 
 async function main() {
-  console.log('Initializing DynamoDB (Alternator) tables...');
+  console.log('Initializing Token Registry DynamoDB (Alternator) tables...');
   const endpoint = process.env.DYNAMODB_ENDPOINT || 'http://localhost:8000';
   console.log(`Endpoint: ${endpoint}`);
 
@@ -124,21 +120,10 @@ async function main() {
 
   await ensureTokenRegistry();
 
-  const tokenTablesPath = path.join(__dirname, '..', 'modules', 'tokenRegistry', 'src', 'utils', 'tables.json');
-  await createAllTablesFromJson(tokenTablesPath);
-
-  // also create payment module tables if present
-  const paymentTablesPath = path.join(__dirname, '..', 'modules', 'payment', 'src', 'utils', 'tables.json');
-  try {
-    await createAllTablesFromJson(paymentTablesPath);
-  } catch (e) {
-    console.log('No payment tables to create or error creating payment tables:', e.message || e);
-  }
-
-  console.log('DynamoDB tables initialization completed.');
+  console.log('Token Registry tables initialization completed.');
 }
 
 main().catch((err) => {
-  console.error('Init failed:', err.message || err);
+  console.error('Token Registry init failed:', err.message || err);
   process.exit(1);
 });
