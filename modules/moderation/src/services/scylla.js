@@ -3,8 +3,6 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs').promises;
 const { pathToFileURL } = require('url');
-const CircuitBreaker = require('opossum');
-const { default: pLimit } = require('p-limit');
 
 /**
  * ScyllaDb - Node.js client for ScyllaDB with Alternator endpoint
@@ -23,9 +21,6 @@ class Scylla {
     static #cache = { getItem: {}, scan: {}, describe: {} };
     static #persistentAgent = null; // Will be initialized based on protocol
     static #customRequestOptions = {};
-    static #limiter = null; // p-limit instance when enabled
-    static #breaker = null; // global breaker instance
-    static #operationBreakers = {}; // per-operation breakers when enabled
 
     /* ---------- RUNTIME CONFIG ---------- */
     /**
@@ -151,12 +146,8 @@ class Scylla {
             throw new TypeError('ScyllaDb.request invalid arguments');
         }
 
-        const operationType = 'general';
         const exec = () => Scylla.#coreRequest(target, payload, port, agent);
-        const breaker = Scylla.#getBreaker(operationType);
-
-        const guarded = () => (breaker ? breaker.fire(exec) : exec());
-        return Scylla.#runWithLimiter(guarded);
+        return exec();
     }
 
     /**
@@ -952,92 +943,9 @@ class Scylla {
      * Ensure concurrency limiter and breakers are aligned with current config
      */
     static #refreshGuards() {
-        // Keep limiter/breakers aligned with new configuration.
-        Scylla.#setupLimiter();
-        Scylla.#resetBreakers();
+        // concurrency limiter and circuit breaker logic removed
     }
-
-    static #setupLimiter() {
-        const { concurrency = {} } = Scylla.#config;
-        const { maxConcurrent } = concurrency;
-
-        if (!maxConcurrent || !Number.isFinite(maxConcurrent) || maxConcurrent <= 0) {
-            Scylla.#limiter = null; // unlimited
-            return;
-        }
-
-        Scylla.#limiter = pLimit(maxConcurrent);
-    }
-
-    static #resetBreakers() {
-        // Reset breaker caches; recreated lazily on next use.
-        Scylla.#breaker = null;
-        Scylla.#operationBreakers = {};
-    }
-
-    static #getBreaker(operationType) {
-        const cbCfg = Scylla.#config.circuitBreaker ?? {};
-        if (cbCfg.enabled === false) return null;
-
-        // opossum breaker options
-        const opts = {
-            timeout: cbCfg.timeout ?? 10000,
-            errorThresholdPercentage: cbCfg.errorThresholdPercentage ?? 50,
-            volumeThreshold: cbCfg.volumeThreshold ?? 10,
-            resetTimeout: cbCfg.resetTimeout ?? 30000,
-        };
-
-        const mode = Scylla.#config.breakerMode === 'perOperation' ? 'perOperation' : 'global';
-
-        const build = (op) => {
-            // The breaker wraps a function that returns a promise-producing function.
-            const br = new CircuitBreaker(fn => fn(), opts);
-            br.on('open', () => console.warn('Scylla breaker open', { operationType: op }));
-            br.on('halfOpen', () => console.warn('Scylla breaker half-open', { operationType: op }));
-            br.on('close', () => console.log('Scylla breaker closed', { operationType: op }));
-            br.on('timeout', () => console.warn('Scylla breaker timeout', { operationType: op }));
-            br.on('reject', () => console.warn('Scylla breaker rejected', { operationType: op }));
-            return br;
-        };
-
-        if (mode === 'perOperation') {
-            if (!Scylla.#operationBreakers[operationType]) {
-                Scylla.#operationBreakers[operationType] = build(operationType);
-            }
-            return Scylla.#operationBreakers[operationType];
-        }
-
-        if (!Scylla.#breaker) {
-            Scylla.#breaker = build('global');
-        }
-        return Scylla.#breaker;
-    }
-
-    static #runWithLimiter(fn) {
-        // Lazily initialize limiter if not set.
-        if (Scylla.#limiter === null) {
-            Scylla.#setupLimiter();
-        }
-
-        const limit = Scylla.#limiter;
-        if (!limit) return fn();
-
-        const { concurrency = {}, queuePolicy = {} } = Scylla.#config;
-        const { maxQueue = Infinity, queueBehavior = queuePolicy.onSaturated } = concurrency;
-        const onSaturated = queuePolicy.onSaturated ?? queueBehavior ?? 'reject';
-
-        if (Number.isFinite(maxQueue) && maxQueue >= 0) {
-            const pending = limit.pendingCount ?? 0;
-            if (pending >= maxQueue && onSaturated !== 'wait') {
-                const err = new Error('Scylla request queue saturated');
-                err.code = 'SCYLLA_QUEUE_SATURATED';
-                throw err;
-            }
-        }
-
-        // Queue the function respecting maxConcurrent and queue limits.
-        return limit(fn);
-    }
+    
 
     /**
      * Get error history
