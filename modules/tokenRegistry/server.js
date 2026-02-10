@@ -49,13 +49,6 @@ async function ensureDatabaseReady() {
   }
 }
 
-// Middleware
-router.use(cors({
-  origin: '*',
-  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With'],
-  maxAge: 86400
-}));
 
 router.use(express.json());
 router.use(express.urlencoded({ extended: true }));
@@ -72,30 +65,6 @@ router.get('/health', (req, res) => {
 
 // Mount token registry routes
 router.use('/', tokenRegistryRouter);
-
-// Error handling middleware
-router.use((err, req, res, next) => {
-  console.error('Token Registry Error:', err);
-
-  const status = err.status || err.statusCode || 500;
-  const error = {
-    error: err.message || 'Internal Server Error',
-    message: err.details || err.message,
-    code: err.code,
-    status: status
-  };
-
-  res.status(status).json(error);
-});
-
-// 404 handler
-router.use((req, res) => {
-  res.status(404).json({
-    error: 'Not Found',
-    message: `Route ${req.method} ${req.path} not found`,
-    status: 404
-  });
-});
 
 // ============================================
 // INIT SERVICE

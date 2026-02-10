@@ -20,7 +20,7 @@ const PORT = process.env.PORT || 3000;
 const RUN_SEPARATELY = process.env.RUN_MODULES_SEPARATELY === 'true';
 const ENABLED_MODULES = process.env.ENABLED_MODULES ?
   process.env.ENABLED_MODULES.split(',').map(m => m.trim()) :
-  ['blockUserService', 'users', 'media', 'moderation'];
+  ['blockUserService', 'users', 'media', 'moderation', 'payment', 'tokenRegistry'];
 
 // Middleware
 const corsOptions = {
@@ -246,3 +246,4 @@ async function startServer() {
 startServer();
 
 module.exports = app;
+// console.log(i,'ROUTE',Object.keys(s.route.methods).join(','), s.route.path);

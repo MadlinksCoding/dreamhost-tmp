@@ -37,6 +37,7 @@
     "@babel/core": "^7.23.0",
     "@babel/preset-env": "^7.23.0",
     "babel-jest": "^29.7.0",
+    "body-parser": "^2.2.2",
     "cassandra-driver": "^4.8.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",

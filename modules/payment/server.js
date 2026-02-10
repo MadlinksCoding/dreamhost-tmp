@@ -65,28 +65,7 @@ router.get('/health', (req, res) => {
 router.use('/', paymentRouter);
 
 // Error handling middleware
-router.use((err, req, res, next) => {
-  console.error('Payment Gateway Error:', err);
-
-  const status = err.status || err.statusCode || 500;
-  const error = {
-    error: err.message || 'Internal Server Error',
-    message: err.details || err.message,
-    code: err.code,
-    status: status
-  };
-
-  res.status(status).json(error);
-});
-
-// 404 handler
-router.use((req, res) => {
-  res.status(404).json({
-    error: 'Not Found',
-    message: `Route ${req.method} ${req.path} not found`,
-    status: 404
-  });
-});
+// Error and 404 handlers are applied only when running this module standalone
 
 // ============================================
 // INIT SERVICE
@@ -110,6 +89,29 @@ if (require.main === module) {
 
   // Apply router middleware
   app.use('/', router);
+
+  // When running standalone, attach module-level error and 404 handlers
+  app.use((err, req, res, next) => {
+    console.error('Payment Gateway Error:', err);
+
+    const status = err.status || err.statusCode || 500;
+    const error = {
+      error: err.message || 'Internal Server Error',
+      message: err.details || err.message,
+      code: err.code,
+      status: status
+    };
+
+    res.status(status).json(error);
+  });
+
+  app.use((req, res) => {
+    res.status(404).json({
+      error: 'Not Found',
+      message: `Route ${req.method} ${req.path} not found`,
+      status: 404
+    });
+  });
 
   // Start server
   async function startServer() {
