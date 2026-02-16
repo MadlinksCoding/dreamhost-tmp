@@ -1,9 +1,7 @@
 const ModerationModule = require('../src/core/moderation.js');
 const Moderation = ModerationModule.default || ModerationModule;
 const Scylla = require('../src/services/scylla.js');
-const SafeUtils = require('../src/utils/SafeUtils.js');
-const Logger = require('../src/utils/Logger.js');
-const ErrorHandler = require('../src/utils/ErrorHandler.js');
+const {SafeUtils, Logger,ErrorHandler} = require('../src/utils/index.js');
 
 // Mock dependencies – single object so tests and Moderation (default import) share same reference
 jest.mock('../src/services/scylla.js', () => {
@@ -27,7 +25,7 @@ jest.mock('../src/services/scylla.js', () => {
   return m;
 });
 
-jest.mock('../src/utils/SafeUtils.js', () => {
+jest.mock('../../../utils/SafeUtils.js', () => {
   const defaultSanitizeValidate = (schema) => {
     const r = {};
     for (const [k, v] of Object.entries(schema)) {
@@ -53,26 +51,32 @@ jest.mock('../src/utils/SafeUtils.js', () => {
   return m;
 });
 
-jest.mock('../src/utils/Logger.js', () => {
+jest.mock('../../../utils/Logger.js', () => {
   const m = { writeLog: jest.fn(), debugLog: jest.fn() };
   m.default = m;
   m.__esModule = true;
   return m;
 });
 
-jest.mock('../src/utils/ErrorHandler.js', () => ({
+jest.mock('../../../utils/ErrorHandler.js', () => ({
   addError: jest.fn(),
   clear: jest.fn(),
   getAllErrors: jest.fn(() => [])
 }));
-jest.mock('../src/utils/DateTime.js', () => {
+jest.mock('../../../utils/DateTime.js', () => {
   const dt = { now: () => new Date().toISOString().slice(0, 19).replace('T', ' ') };
   return { __esModule: true, default: dt };
 });
 
+jest.mock('../../../utils/EnvLoader.js', () => ({
+  loadEnv: jest.fn(() => ({}))
+}));
+
 jest.mock('crypto', () => {
+  const actual = jest.requireActual('crypto');
   let uuidCounter = 0;
   return {
+    ...actual,
     randomUUID: jest.fn(() => {
       const n = ++uuidCounter;
       const a = (n).toString(16).padStart(8, '0').slice(-8);
