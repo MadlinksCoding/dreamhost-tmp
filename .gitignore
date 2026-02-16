@@ -132,3 +132,5 @@ node_repl_history
 
 # Local env config (secrets)
 *envConfig.json
+
+keys.ssh
