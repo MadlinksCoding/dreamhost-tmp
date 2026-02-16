@@ -2640,20 +2640,25 @@ module.exports = class Moderation {
    * @param {boolean} [options.asc=false] - Sort ascending
    */
   static async getModerationItems(
-    { userId, status, priority, type, dayKey, moderatedBy, contentId, escalatedBy } = {},
+    { userId, status, priority, type, dayKey, moderatedBy, contentId, escalatedBy, moderationId } = {},
     { limit = 20, nextToken = null, start = null, end = null, asc = false } = {}
   ) {
-    Logger.debugLog?.(`[Moderation] [getModerationItems] [START] Getting moderation items with filters: userId=${userId}, status=${status}, priority=${priority}, type=${type}, dayKey=${dayKey}, moderatedBy=${moderatedBy}, contentId=${contentId}, escalatedBy=${escalatedBy}`);
+    Logger.debugLog?.(`[Moderation] [getModerationItems] [START] Getting moderation items with filters: userId=${userId}, status=${status}, priority=${priority}, type=${type}, dayKey=${dayKey}, moderatedBy=${moderatedBy}, contentId=${contentId}, escalatedBy=${escalatedBy}, moderationId=${moderationId}`);
     try {
       // 1. Sanitize Inputs
       const sUserId = SafeUtils.sanitizeString(userId);
-      const sStatus = SafeUtils.sanitizeString(status);
+      let sStatus = SafeUtils.sanitizeString(status);
       const sPriority = SafeUtils.sanitizeString(priority);
       const sType = SafeUtils.sanitizeString(type);
       const sDayKey = SafeUtils.sanitizeString(dayKey);
       const sModeratedBy = SafeUtils.sanitizeString(moderatedBy);
       const sContentId = SafeUtils.sanitizeString(contentId);
       const sEscalatedBy = SafeUtils.sanitizeString(escalatedBy);
+      const sModerationId = SafeUtils.sanitizeString(moderationId);
+
+      if (sStatus === "all") {
+        sStatus = null;
+      }
 
       let sLimit = SafeUtils.sanitizeInteger(limit) || 20;
       // Enforce maximum query result size to prevent memory exhaustion
@@ -2702,6 +2707,18 @@ module.exports = class Moderation {
           data: { userId, status: sStatus, priority, type, dayKey }
         });
         throw new Error(`Invalid status: ${sStatus}`);
+      }
+      if (sModerationId) {
+        try {
+          this._validateModerationIdFormat(sModerationId);
+        } catch (validationError) {
+          ErrorHandler.addError(`Invalid moderationId format: ${sModerationId}`, {
+            code: "INVALID_MODERATION_ID",
+            origin: "Moderation.getModerationItems",
+            data: { moderationId: sModerationId }
+          });
+          throw validationError;
+        }
       }
       if (sPriority && !this.PRIORITY_SET.has(sPriority)) {
         ErrorHandler.addError(`Invalid priority: ${sPriority}`, {
@@ -2769,22 +2786,22 @@ module.exports = class Moderation {
       // Helper to add timestamp range to Key or Filter
       const addTimeRange = (isKey = false, keyPrefix = "") => {
         const target = isKey ? keyCondition : filterExpression;
+        const useRange = sStart !== null || sEnd !== null;
+        if (!useRange) {
+          return;
+        }
+
         let field;
         if (isKey) {
-          if (keyPrefix) {
-            // Use provided prefix (should already be an alias)
-            field = keyPrefix;
-          } else {
-            // Use ExpressionAttributeName for submittedAt
-            field = "#sa";
-          attributeNames["#sa"] = "submittedAt";
-          }
+          // Use provided prefix (should already be an alias)
+          field = keyPrefix || "#sa";
         } else {
           // Filter expression - use alias
           field = "#sa";
-          if (sStart !== null || sEnd !== null) {
-            attributeNames["#sa"] = "submittedAt";
-          }
+        }
+
+        if (field === "#sa") {
+          attributeNames["#sa"] = "submittedAt";
         }
 
         if (sStart !== null && sEnd !== null) {
@@ -2802,8 +2819,21 @@ module.exports = class Moderation {
 
       // 3. Select Strategy (Index Selection)
 
+      // Strategy 0: Moderation ID (Highest Priority)
+      if (sModerationId) {
+        indexName = this.GSI_BY_MOD_ID;
+        keyCondition.push("#mid = :mid");
+        attributeNames["#mid"] = "moderationId";
+        attributeValues[":mid"] = sModerationId;
+
+        if (sUserId) {
+          keyCondition.push("#uid = :uid");
+          attributeNames["#uid"] = "userId";
+          attributeValues[":uid"] = sUserId;
+        }
+      }
       // Strategy A: User ID (Highest Priority)
-      if (sUserId) {
+      else if (sUserId) {
         indexName = this.GSI_USER_STATUS_DATE;
         keyCondition.push("#uid = :uid");
         attributeNames["#uid"] = "userId";
@@ -2888,16 +2918,17 @@ module.exports = class Moderation {
       }
 
       // 4. Apply Remaining Filters (The "AND" logic)
+      const useInMemoryFilters = indexName === this.GSI_BY_MOD_ID;
       // If we didn't use the field in the KeyCondition, add it to FilterExpression
 
       // userId (only if not used as PK)
-      if (sUserId && !keyCondition.some((k) => k.includes("userId"))) {
+      if (!useInMemoryFilters && sUserId && !keyCondition.some((k) => k.includes("userId"))) {
         addFilter("userId", sUserId);
       }
 
       // status (only if not used in KeyCondition)
       // Note: Strategy A handles status specially. Strategy C uses it as PK.
-      if (sStatus) {
+      if (!useInMemoryFilters && sStatus) {
         const usedInKey =
           indexName === this.GSI_STATUS_DATE ||
           (indexName === this.GSI_USER_STATUS_DATE &&
@@ -2908,24 +2939,26 @@ module.exports = class Moderation {
       }
 
       // priority
-      if (sPriority && indexName !== this.GSI_PRIORITY) {
+      if (!useInMemoryFilters && sPriority && indexName !== this.GSI_PRIORITY) {
         addFilter("priority", sPriority);
       }
 
       // type
-      if (sType && indexName !== this.GSI_TYPE_DATE) {
+      if (!useInMemoryFilters && sType && indexName !== this.GSI_TYPE_DATE) {
         addFilter("type", sType, "type");
       }
 
       // dayKey
-      if (sDayKey && indexName !== this.GSI_ALL_BY_DATE) {
+      if (!useInMemoryFilters && sDayKey && indexName !== this.GSI_ALL_BY_DATE) {
         addFilter("dayKey", sDayKey);
       }
       
       // Always filter out soft-deleted items unless explicitly requested
-      filterExpression.push("attribute_not_exists(#del) OR #del = :delFalse");
-      attributeNames["#del"] = "isDeleted";
-      attributeValues[":delFalse"] = false;
+      if (!useInMemoryFilters) {
+        filterExpression.push("attribute_not_exists(#del) OR #del = :delFalse");
+        attributeNames["#del"] = "isDeleted";
+        attributeValues[":delFalse"] = false;
+      }
 
       // 5. Construct Request
       const requestParams = {
@@ -2965,7 +2998,32 @@ module.exports = class Moderation {
         Scylla.request(method, requestParams)
       );
 
-      const items = (result.Items ?? []).map(Scylla.unmarshalItem);
+      let items = (result.Items ?? []).map(Scylla.unmarshalItem);
+      if (useInMemoryFilters) {
+        const keys = items
+          .map((item) => ({ [this.PK]: item[this.PK], [this.SK]: item[this.SK] }))
+          .filter((key) => key[this.PK] && key[this.SK]);
+
+        const fetched = await Promise.all(
+          keys.map((key) => this._retryOperation(() => Scylla.getItem(this.TABLE, key)))
+        );
+
+        items = fetched.filter((item) => {
+          if (!item) return false;
+          if (item.isDeleted === true) return false;
+          if (sUserId && item.userId !== sUserId) return false;
+          if (sStatus && item.status !== sStatus) return false;
+          if (sPriority && item.priority !== sPriority) return false;
+          if (sType && item.type !== sType) return false;
+          if (sDayKey && item.dayKey !== sDayKey) return false;
+          if (sModeratedBy && item.moderatedBy !== sModeratedBy) return false;
+          if (sContentId && item.contentId !== sContentId) return false;
+          if (sEscalatedBy && item.escalatedBy !== sEscalatedBy) return false;
+          if (sStart !== null && typeof item.submittedAt === "number" && item.submittedAt < sStart) return false;
+          if (sEnd !== null && typeof item.submittedAt === "number" && item.submittedAt > sEnd) return false;
+          return true;
+        });
+      }
 
       // Sort for Scan (since Scan doesn't guarantee order)
       if (
@@ -3142,18 +3200,21 @@ module.exports = class Moderation {
 
       // Existing path for a specific status (Query on GSI)
       const expression = [`#s = :status`];
-      const names = { "#s": "status", "#sa": "submittedAt" };
+      const names = { "#s": "status" };
       const vals = { ":status": sanitizedStatus };
 
       if (sanitizedStart !== null && sanitizedEnd !== null) {
         expression.push("#sa BETWEEN :start AND :end");
+        names["#sa"] = "submittedAt";
         vals[":start"] = sanitizedStart;
         vals[":end"] = sanitizedEnd;
       } else if (sanitizedStart !== null) {
         expression.push("#sa >= :start");
+        names["#sa"] = "submittedAt";
         vals[":start"] = sanitizedStart;
       } else if (sanitizedEnd !== null) {
         expression.push("#sa <= :end");
+        names["#sa"] = "submittedAt";
         vals[":end"] = sanitizedEnd;
       }
       const options = {
@@ -3253,18 +3314,21 @@ module.exports = class Moderation {
       const sanitizedEnd = end !== null ? SafeUtils.sanitizeInteger(end) : null;
 
       const expression = ["#d = :day"];
-      const names = { "#d": "dayKey", "#sa": "submittedAt" };
+      const names = { "#d": "dayKey" };
       const values = { ":day": sanitizedDayKey };
 
       if (sanitizedStart !== null && sanitizedEnd !== null) {
         expression.push("#sa BETWEEN :start AND :end");
+        names["#sa"] = "submittedAt";
         values[":start"] = sanitizedStart;
         values[":end"] = sanitizedEnd;
       } else if (sanitizedStart !== null) {
         expression.push("#sa >= :start");
+        names["#sa"] = "submittedAt";
         values[":start"] = sanitizedStart;
       } else if (sanitizedEnd !== null) {
         expression.push("#sa <= :end");
+        names["#sa"] = "submittedAt";
         values[":end"] = sanitizedEnd;
       }
 
@@ -4356,19 +4420,22 @@ module.exports = class Moderation {
       else if (sanitizedModeratedBy !== null && sanitizedModeratedBy !== "null") {
         // Use GSI_MODERATED_BY for moderator-specific queries
         const expression = ["#mb = :mb"];
-        const names = { "#mb": "moderatedBy", "#sa": "submittedAt", "#s": "status" };
+        const names = { "#mb": "moderatedBy" };
         const vals = { ":mb": sanitizedModeratedBy };
 
         // Add submittedAt range to key condition if provided
         if (sanitizedStart !== null && sanitizedEnd !== null) {
           expression.push("#sa BETWEEN :start AND :end");
+          names["#sa"] = "submittedAt";
           vals[":start"] = sanitizedStart;
           vals[":end"] = sanitizedEnd;
         } else if (sanitizedStart !== null) {
           expression.push("#sa >= :start");
+          names["#sa"] = "submittedAt";
           vals[":start"] = sanitizedStart;
         } else if (sanitizedEnd !== null) {
           expression.push("#sa <= :end");
+          names["#sa"] = "submittedAt";
           vals[":end"] = sanitizedEnd;
         }
 
@@ -4376,6 +4443,7 @@ module.exports = class Moderation {
         // Filter by status if provided
         if (sanitizedStatus) {
           filterExpressions.push("#s = :status");
+          names["#s"] = "status";
           vals[":status"] = sanitizedStatus;
         }
 
@@ -4429,18 +4497,21 @@ module.exports = class Moderation {
       else {
         // Use GSI_STATUS_DATE for status-only queries
         const expression = [`#s = :status`];
-        const names = { "#s": "status", "#sa": "submittedAt" };
+        const names = { "#s": "status" };
         const vals = { ":status": sanitizedStatus };
 
         if (sanitizedStart !== null && sanitizedEnd !== null) {
           expression.push("#sa BETWEEN :start AND :end");
+          names["#sa"] = "submittedAt";
           vals[":start"] = sanitizedStart;
           vals[":end"] = sanitizedEnd;
         } else if (sanitizedStart !== null) {
           expression.push("#sa >= :start");
+          names["#sa"] = "submittedAt";
           vals[":start"] = sanitizedStart;
         } else if (sanitizedEnd !== null) {
           expression.push("#sa <= :end");
+          names["#sa"] = "submittedAt";
           vals[":end"] = sanitizedEnd;
         }
 

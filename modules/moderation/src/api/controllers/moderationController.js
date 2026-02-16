@@ -61,6 +61,7 @@ const cacheFlushGeneral = async (req, res) => {
     res.status(400).json({ error: error.message });
   }
 };
+const { zstdCompress } = require('zlib');
 // ============================================
 // CREATE MODERATION ENTRY Controller
 // ============================================
@@ -115,16 +116,31 @@ const getModerationItems = async (req, res) => {
   // ============================================
   // GET MODERATION ITEMS (General)
   // ============================================
-  try {
+  try {zstdCompress
     const { limit = 20, nextToken, start, end, asc = "false", show_total_count } = req.query; // General pagination params
     // Extract possible filters from query params
-    const  { userId, status, priority, type, dayKey } = req.query;
+    const { userId, status, priority, type, dayKey, moderatedBy, contentId, escalatedBy, q } = req.query;
+    let searchModerationId;
+    let searchContentId;
+    if (typeof q === "string" && q.trim()) {
+      const trimmed = q.trim();
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+      if (uuidRegex.test(trimmed)) {
+        searchModerationId = trimmed;
+      } else {
+        searchContentId = trimmed;
+      }
+    }
     const filters = {
       userId: userId || undefined,
       status: status || undefined,
       priority: priority || undefined,
       type: type || undefined,
       dayKey: dayKey || undefined,
+      moderatedBy: moderatedBy || undefined,
+      contentId: contentId || searchContentId || undefined,
+      escalatedBy: escalatedBy || undefined,
+      moderationId: searchModerationId || undefined,
     };
     const options = {
       limit: parseInt(limit, 10),
